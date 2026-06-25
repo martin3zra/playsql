@@ -15,6 +15,8 @@ type Builder struct {
 	meta    *metadata.ModelMeta
 	columns []string
 	wheres  []grammar.WhereClause
+	limit   int
+	offset  int
 	err     error // first construction error; surfaced by terminal ops
 }
 
@@ -125,22 +127,40 @@ func expandValues(values []any) []any {
 	return out
 }
 
+// Limit caps the number of rows returned (0 = no limit).
+func (b *Builder) Limit(n int) *Builder { b.limit = n; return b }
+
+// Offset skips n rows.
+func (b *Builder) Offset(n int) *Builder { b.offset = n; return b }
+
+// Take is an alias for Limit (Eloquent-style).
+func (b *Builder) Take(n int) *Builder { return b.Limit(n) }
+
+// Skip is an alias for Offset (Eloquent-style).
+func (b *Builder) Skip(n int) *Builder { return b.Offset(n) }
+
+// compiled assembles the dialect-neutral query from the builder's state.
+func (b *Builder) compiled() grammar.CompiledQuery {
+	cols := b.columns
+	if len(cols) == 0 {
+		cols = b.meta.ColumnNames()
+	}
+	return grammar.CompiledQuery{
+		Table:   b.meta.Table,
+		Columns: cols,
+		Wheres:  b.wheres,
+		Limit:   b.limit,
+		Offset:  b.offset,
+	}
+}
+
 // Get executes the query and scans all rows into dest (a *[]T or *[]*T).
 func (b *Builder) Get(ctx context.Context, dest any) error {
 	if b.err != nil {
 		return b.err
 	}
 
-	cols := b.columns
-	if len(cols) == 0 {
-		cols = b.meta.ColumnNames()
-	}
-
-	sqlStr, args := b.sess.grammar.CompileSelect(grammar.CompiledQuery{
-		Table:   b.meta.Table,
-		Columns: cols,
-		Wheres:  b.wheres,
-	})
+	sqlStr, args := b.sess.grammar.CompileSelect(b.compiled())
 
 	rows, err := b.sess.run.QueryContext(ctx, sqlStr, args...)
 	if err != nil {
@@ -152,4 +172,48 @@ func (b *Builder) Get(ctx context.Context, dest any) error {
 		return err
 	}
 	return rows.Err()
+}
+
+// First scans the first matching row into dest (a *T). Returns ErrNotFound when
+// nothing matches.
+func (b *Builder) First(ctx context.Context, dest any) error {
+	if b.err != nil {
+		return b.err
+	}
+
+	b.limit = 1
+	sqlStr, args := b.sess.grammar.CompileSelect(b.compiled())
+
+	rows, err := b.sess.run.QueryContext(ctx, sqlStr, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	return scanOne(rows, dest, b.meta)
+}
+
+// Find scans the row whose primary key equals id into dest (a *T). The id is
+// bound as a parameter as-is — no type assertion — so int, int64, string, and
+// UUID keys all work. Returns ErrNotFound when nothing matches.
+func (b *Builder) Find(ctx context.Context, dest, id any) error {
+	return b.WhereEq(b.meta.PrimaryKey, id).First(ctx, dest)
+}
+
+// Count returns the number of matching rows, ignoring any limit/offset.
+func (b *Builder) Count(ctx context.Context) (int64, error) {
+	if b.err != nil {
+		return 0, b.err
+	}
+
+	q := b.compiled()
+	q.Aggregate = "COUNT(*)"
+	q.Limit, q.Offset = 0, 0
+	sqlStr, args := b.sess.grammar.CompileSelect(q)
+
+	var count int64
+	if err := b.sess.run.QueryRowContext(ctx, sqlStr, args...).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }

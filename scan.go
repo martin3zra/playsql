@@ -39,17 +39,7 @@ func scanRows(rows *sql.Rows, dest any, meta *metadata.ModelMeta) error {
 		elemPtr := reflect.New(structType) // *T
 		structVal := elemPtr.Elem()
 
-		targets := make([]any, len(cols))
-		for i, col := range cols {
-			if idx, ok := meta.FieldIndexByColumn(col); ok {
-				targets[i] = structVal.Field(idx).Addr().Interface()
-			} else {
-				var discard any
-				targets[i] = &discard
-			}
-		}
-
-		if err := rows.Scan(targets...); err != nil {
+		if err := rows.Scan(scanTargets(structVal, cols, meta)...); err != nil {
 			return err
 		}
 
@@ -61,4 +51,46 @@ func scanRows(rows *sql.Rows, dest any, meta *metadata.ModelMeta) error {
 	}
 
 	return nil
+}
+
+// scanOne scans a single row into dest (a *T where T is a struct). It returns
+// ErrNotFound when there is no row.
+func scanOne(rows *sql.Rows, dest any, meta *metadata.ModelMeta) error {
+	dv := reflect.ValueOf(dest)
+	if dv.Kind() != reflect.Ptr || dv.Elem().Kind() != reflect.Struct {
+		return fmt.Errorf("playsql: dest must be a pointer to a struct, got %T", dest)
+	}
+
+	cols, err := rows.Columns()
+	if err != nil {
+		return err
+	}
+
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		return ErrNotFound
+	}
+
+	if err := rows.Scan(scanTargets(dv.Elem(), cols, meta)...); err != nil {
+		return err
+	}
+	return rows.Err()
+}
+
+// scanTargets builds the per-column scan destinations for one struct value:
+// the mapped field's address, or a throwaway for unmapped columns. Column->field
+// mapping comes from metadata; no tag reflection happens here.
+func scanTargets(structVal reflect.Value, cols []string, meta *metadata.ModelMeta) []any {
+	targets := make([]any, len(cols))
+	for i, col := range cols {
+		if idx, ok := meta.FieldIndexByColumn(col); ok {
+			targets[i] = structVal.Field(idx).Addr().Interface()
+		} else {
+			var discard any
+			targets[i] = &discard
+		}
+	}
+	return targets
 }

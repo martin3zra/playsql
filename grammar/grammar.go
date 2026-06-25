@@ -3,7 +3,10 @@
 // the grammar turns it into a driver-specific SQL string + args.
 package grammar
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // WhereKind classifies a predicate so the grammar can emit the right SQL and
 // the right number of placeholders.
@@ -36,9 +39,12 @@ type WhereClause struct {
 // produced. It carries no SQL text and no placeholders — those are the
 // grammar's job.
 type CompiledQuery struct {
-	Table   string
-	Columns []string // empty => SELECT *
-	Wheres  []WhereClause
+	Table     string
+	Columns   []string // empty => SELECT *
+	Aggregate string   // e.g. "COUNT(*)"; overrides Columns, emitted verbatim
+	Wheres    []WhereClause
+	Limit     int // 0 => no LIMIT
+	Offset    int // 0 => no OFFSET
 }
 
 // Grammar generates SQL for a specific driver.
@@ -64,7 +70,10 @@ func For(driver string) Grammar {
 // Wrap (quoting) and Placeholder (bind style), so both are taken from g.
 func compileSelect(g Grammar, q CompiledQuery) (string, []any) {
 	cols := "*"
-	if len(q.Columns) > 0 {
+	switch {
+	case q.Aggregate != "":
+		cols = q.Aggregate // verbatim, e.g. COUNT(*)
+	case len(q.Columns) > 0:
 		wrapped := make([]string, len(q.Columns))
 		for i, c := range q.Columns {
 			wrapped[i] = g.Wrap(c)
@@ -85,6 +94,13 @@ func compileSelect(g Grammar, q CompiledQuery) (string, []any) {
 		sb.WriteString(" WHERE ")
 		sb.WriteString(clause)
 		args = append(args, wargs...)
+	}
+
+	if q.Limit > 0 {
+		fmt.Fprintf(&sb, " LIMIT %d", q.Limit)
+	}
+	if q.Offset > 0 {
+		fmt.Fprintf(&sb, " OFFSET %d", q.Offset)
 	}
 
 	return sb.String(), args
