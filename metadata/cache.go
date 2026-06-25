@@ -42,6 +42,17 @@ func (m *ModelMeta) ColumnNames() []string {
 	return names
 }
 
+// PrimaryKeyFieldIndex returns the struct field index of the primary key column.
+func (m *ModelMeta) PrimaryKeyFieldIndex() (int, bool) {
+	for _, c := range m.Columns {
+		if c.PrimaryKey {
+			return c.FieldIndex, true
+		}
+	}
+	i, ok := m.fieldByCol[m.PrimaryKey]
+	return i, ok
+}
+
 var cache sync.Map // reflect.Type -> *ModelMeta
 
 // For returns the metadata for a model value, parsing once and caching by type.

@@ -47,9 +47,30 @@ type CompiledQuery struct {
 	Offset    int // 0 => no OFFSET
 }
 
+// InsertStmt describes a single-row INSERT. Values are supplied by the caller in
+// Columns order; the grammar only needs the column names and key info.
+type InsertStmt struct {
+	Table        string
+	Columns      []string
+	PrimaryKey   string
+	Incrementing bool
+}
+
+// UpdateStmt describes an UPDATE. Set columns first, then Wheres; the grammar
+// numbers placeholders contiguously across both.
+type UpdateStmt struct {
+	Table   string
+	Columns []string // SET columns
+	Wheres  []WhereClause
+}
+
 // Grammar generates SQL for a specific driver.
 type Grammar interface {
 	CompileSelect(q CompiledQuery) (sql string, args []any)
+	// CompileInsert returns the statement and whether it yields the new id via a
+	// RETURNING clause (true) versus the driver's LastInsertId (false).
+	CompileInsert(s InsertStmt) (sql string, returnsID bool)
+	CompileUpdate(s UpdateStmt) (sql string)
 	Wrap(identifier string) string
 	Placeholder(n int) string // n is 1-based bind position
 }
@@ -104,6 +125,65 @@ func compileSelect(g Grammar, q CompiledQuery) (string, []any) {
 	}
 
 	return sb.String(), args
+}
+
+// compileInsert builds a single-row INSERT. returning controls whether a
+// RETURNING clause is appended (Postgres) to yield the generated id.
+func compileInsert(g Grammar, s InsertStmt, returning bool) (string, bool) {
+	var sb strings.Builder
+	sb.WriteString("INSERT INTO ")
+	sb.WriteString(g.Wrap(s.Table))
+	sb.WriteString(" (")
+	for i, c := range s.Columns {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString(g.Wrap(c))
+	}
+	sb.WriteString(") VALUES (")
+	for i := range s.Columns {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString(g.Placeholder(i + 1))
+	}
+	sb.WriteByte(')')
+
+	returnsID := false
+	if returning && s.Incrementing && s.PrimaryKey != "" {
+		sb.WriteString(" RETURNING ")
+		sb.WriteString(g.Wrap(s.PrimaryKey))
+		returnsID = true
+	}
+	return sb.String(), returnsID
+}
+
+// compileUpdate builds an UPDATE, numbering placeholders contiguously across the
+// SET assignments and the WHERE predicates.
+func compileUpdate(g Grammar, s UpdateStmt) string {
+	var sb strings.Builder
+	sb.WriteString("UPDATE ")
+	sb.WriteString(g.Wrap(s.Table))
+	sb.WriteString(" SET ")
+
+	n := 0
+	for i, c := range s.Columns {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		n++
+		sb.WriteString(g.Wrap(c))
+		sb.WriteString(" = ")
+		sb.WriteString(g.Placeholder(n))
+	}
+
+	if len(s.Wheres) > 0 {
+		clause, _ := compileWheres(g, s.Wheres, &n)
+		sb.WriteString(" WHERE ")
+		sb.WriteString(clause)
+	}
+
+	return sb.String()
 }
 
 // compileWheres assembles a list of predicates, threading a running 1-based

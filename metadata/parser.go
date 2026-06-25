@@ -29,6 +29,12 @@ func parse(t reflect.Type) *ModelMeta {
 		fieldByCol:   make(map[string]int),
 	}
 
+	var (
+		pkKind            = reflect.Invalid
+		explicitIncrement bool
+		sawPK             bool
+	)
+
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 
@@ -49,9 +55,11 @@ func parse(t reflect.Type) *ModelMeta {
 				switch strings.TrimSpace(opt) {
 				case "pk":
 					isPK = true
+					sawPK = true
 					m.PrimaryKey = col
+					pkKind = f.Type.Kind()
 				case "incrementing":
-					m.Incrementing = true
+					explicitIncrement = true
 				}
 			}
 		}
@@ -60,7 +68,22 @@ func parse(t reflect.Type) *ModelMeta {
 		m.fieldByCol[col] = i
 	}
 
+	// Incrementing defaults to whether the key is an integer; an explicit
+	// `incrementing` option forces it on regardless of type.
+	if sawPK && !explicitIncrement {
+		m.Incrementing = isIntegerKind(pkKind)
+	}
+
 	return m
+}
+
+func isIntegerKind(k reflect.Kind) bool {
+	switch k {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return true
+	}
+	return false
 }
 
 func tableName(t reflect.Type) string {

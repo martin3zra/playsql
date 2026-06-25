@@ -13,3 +13,11 @@ func (Postgres) Placeholder(n int) string { return "$" + strconv.Itoa(n) }
 func (g Postgres) CompileSelect(q CompiledQuery) (string, []any) {
 	return compileSelect(g, q)
 }
+
+func (g Postgres) CompileInsert(s InsertStmt) (string, bool) {
+	return compileInsert(g, s, true) // RETURNING <pk>
+}
+
+func (g Postgres) CompileUpdate(s UpdateStmt) string {
+	return compileUpdate(g, s)
+}
