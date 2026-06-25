@@ -20,6 +20,13 @@ func (s *session) Insert(ctx context.Context, model any) error {
 		return err
 	}
 
+	if err := fireBeforeSave(ctx, model); err != nil {
+		return err
+	}
+	if err := fireBeforeCreate(ctx, model); err != nil {
+		return err
+	}
+
 	pkIdx, _ := meta.PrimaryKeyFieldIndex()
 	now := time.Now()
 
@@ -65,7 +72,11 @@ func (s *session) Insert(ctx context.Context, model any) error {
 	}
 
 	markPersisted(model, meta, elem)
-	return nil
+
+	if err := fireAfterCreate(ctx, model); err != nil {
+		return err
+	}
+	return fireAfterSave(ctx, model)
 }
 
 // Update writes the model's columns to the row matching its primary key. When
@@ -86,6 +97,13 @@ func (s *session) Update(ctx context.Context, model any) error {
 		return fmt.Errorf("playsql: Update requires a non-zero primary key")
 	}
 	pkVal := elem.Field(pkIdx).Interface()
+
+	if err := fireBeforeSave(ctx, model); err != nil {
+		return err
+	}
+	if err := fireBeforeUpdate(ctx, model); err != nil {
+		return err
+	}
 
 	// Determine which columns to write.
 	original := originalOf(model)
@@ -112,9 +130,13 @@ func (s *session) Update(ctx context.Context, model any) error {
 		values = append(values, cur)
 	}
 
-	// Nothing changed and we have a baseline -> no-op.
+	// Nothing changed and we have a baseline -> no DB write, but the save
+	// lifecycle still completes.
 	if len(columns) == 0 && original != nil {
-		return nil
+		if err := fireAfterUpdate(ctx, model); err != nil {
+			return err
+		}
+		return fireAfterSave(ctx, model)
 	}
 
 	// Stamp updated_at when present (and there is something to write).
@@ -141,7 +163,11 @@ func (s *session) Update(ctx context.Context, model any) error {
 	}
 
 	markPersisted(model, meta, elem)
-	return nil
+
+	if err := fireAfterUpdate(ctx, model); err != nil {
+		return err
+	}
+	return fireAfterSave(ctx, model)
 }
 
 // Save inserts when the model has no identity yet, otherwise updates. When the
@@ -181,6 +207,10 @@ func (s *session) Delete(ctx context.Context, model any) error {
 		return err
 	}
 
+	if err := fireBeforeDelete(ctx, model); err != nil {
+		return err
+	}
+
 	if meta.SoftDeletes {
 		now := time.Now()
 		sqlStr := s.grammar.CompileUpdate(grammar.UpdateStmt{
@@ -192,10 +222,11 @@ func (s *session) Delete(ctx context.Context, model any) error {
 			return err
 		}
 		setDeletedAt(elem, meta, &now)
-		return nil
+	} else if err := s.hardDelete(ctx, meta, pkVal); err != nil {
+		return err
 	}
 
-	return s.hardDelete(ctx, meta, pkVal)
+	return fireAfterDelete(ctx, model)
 }
 
 // ForceDelete permanently removes the row, ignoring soft-delete.
@@ -208,7 +239,13 @@ func (s *session) ForceDelete(ctx context.Context, model any) error {
 	if err != nil {
 		return err
 	}
-	return s.hardDelete(ctx, meta, pkVal)
+	if err := fireBeforeDelete(ctx, model); err != nil {
+		return err
+	}
+	if err := s.hardDelete(ctx, meta, pkVal); err != nil {
+		return err
+	}
+	return fireAfterDelete(ctx, model)
 }
 
 // Restore clears deleted_at on a soft-deleted row.
