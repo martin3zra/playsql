@@ -115,6 +115,33 @@ func (s *session) Save(ctx context.Context, model any) error {
 	return s.Update(ctx, model)
 }
 
+// Delete removes the row matching the model's primary key. The key must be set.
+func (s *session) Delete(ctx context.Context, model any) error {
+	meta, elem, err := structValue(model)
+	if err != nil {
+		return err
+	}
+
+	pkIdx, ok := meta.PrimaryKeyFieldIndex()
+	if !ok {
+		return fmt.Errorf("playsql: model %q has no primary key", meta.Table)
+	}
+	if elem.Field(pkIdx).IsZero() {
+		return fmt.Errorf("playsql: Delete requires a non-zero primary key")
+	}
+	pkVal := elem.Field(pkIdx).Interface()
+
+	sqlStr := s.grammar.CompileDelete(grammar.DeleteStmt{
+		Table: meta.Table,
+		Wheres: []grammar.WhereClause{
+			{Kind: grammar.WhereBasic, Column: meta.PrimaryKey, Op: "=", Value: pkVal},
+		},
+	})
+
+	_, err = s.run.ExecContext(ctx, sqlStr, pkVal)
+	return err
+}
+
 // structValue resolves model to its metadata and addressable struct value.
 func structValue(model any) (*metadata.ModelMeta, reflect.Value, error) {
 	rv := reflect.ValueOf(model)

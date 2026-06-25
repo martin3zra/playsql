@@ -43,8 +43,21 @@ type CompiledQuery struct {
 	Columns   []string // empty => SELECT *
 	Aggregate string   // e.g. "COUNT(*)"; overrides Columns, emitted verbatim
 	Wheres    []WhereClause
+	Orders    []OrderClause
 	Limit     int // 0 => no LIMIT
 	Offset    int // 0 => no OFFSET
+}
+
+// OrderClause is one ORDER BY term. Direction is "ASC" or "DESC".
+type OrderClause struct {
+	Column    string
+	Direction string
+}
+
+// DeleteStmt describes a DELETE.
+type DeleteStmt struct {
+	Table  string
+	Wheres []WhereClause
 }
 
 // InsertStmt describes a single-row INSERT. Values are supplied by the caller in
@@ -71,6 +84,7 @@ type Grammar interface {
 	// RETURNING clause (true) versus the driver's LastInsertId (false).
 	CompileInsert(s InsertStmt) (sql string, returnsID bool)
 	CompileUpdate(s UpdateStmt) (sql string)
+	CompileDelete(s DeleteStmt) (sql string)
 	Wrap(identifier string) string
 	Placeholder(n int) string // n is 1-based bind position
 }
@@ -117,6 +131,18 @@ func compileSelect(g Grammar, q CompiledQuery) (string, []any) {
 		args = append(args, wargs...)
 	}
 
+	if len(q.Orders) > 0 {
+		sb.WriteString(" ORDER BY ")
+		for i, o := range q.Orders {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(g.Wrap(o.Column))
+			sb.WriteByte(' ')
+			sb.WriteString(o.Direction)
+		}
+	}
+
 	if q.Limit > 0 {
 		fmt.Fprintf(&sb, " LIMIT %d", q.Limit)
 	}
@@ -125,6 +151,20 @@ func compileSelect(g Grammar, q CompiledQuery) (string, []any) {
 	}
 
 	return sb.String(), args
+}
+
+// compileDelete builds a DELETE with parameterized WHERE predicates.
+func compileDelete(g Grammar, s DeleteStmt) string {
+	var sb strings.Builder
+	sb.WriteString("DELETE FROM ")
+	sb.WriteString(g.Wrap(s.Table))
+	if len(s.Wheres) > 0 {
+		n := 0
+		clause, _ := compileWheres(g, s.Wheres, &n)
+		sb.WriteString(" WHERE ")
+		sb.WriteString(clause)
+	}
+	return sb.String()
 }
 
 // compileInsert builds a single-row INSERT. returning controls whether a

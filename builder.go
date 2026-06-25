@@ -10,11 +10,20 @@ import (
 
 // Builder is the only query entry point. It is created fresh per query (never
 // reused) and is agnostic to whether it runs on a connection or a transaction.
+// Direction is a sort order. Use Asc or Desc.
+type Direction string
+
+const (
+	Asc  Direction = "ASC"
+	Desc Direction = "DESC"
+)
+
 type Builder struct {
 	sess    *session
 	meta    *metadata.ModelMeta
 	columns []string
 	wheres  []grammar.WhereClause
+	orders  []grammar.OrderClause
 	limit   int
 	offset  int
 	err     error // first construction error; surfaced by terminal ops
@@ -127,6 +136,12 @@ func expandValues(values []any) []any {
 	return out
 }
 
+// OrderBy adds an ORDER BY term. Call repeatedly for multiple sort keys.
+func (b *Builder) OrderBy(column string, dir Direction) *Builder {
+	b.orders = append(b.orders, grammar.OrderClause{Column: column, Direction: string(dir)})
+	return b
+}
+
 // Limit caps the number of rows returned (0 = no limit).
 func (b *Builder) Limit(n int) *Builder { b.limit = n; return b }
 
@@ -149,6 +164,7 @@ func (b *Builder) compiled() grammar.CompiledQuery {
 		Table:   b.meta.Table,
 		Columns: cols,
 		Wheres:  b.wheres,
+		Orders:  b.orders,
 		Limit:   b.limit,
 		Offset:  b.offset,
 	}
@@ -216,4 +232,39 @@ func (b *Builder) Count(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 	return count, nil
+}
+
+// Delete removes all matching rows and returns the number affected. With no
+// WHERE constraints this deletes every row in the table.
+func (b *Builder) Delete(ctx context.Context) (int64, error) {
+	if b.err != nil {
+		return 0, b.err
+	}
+
+	sqlStr := b.sess.grammar.CompileDelete(grammar.DeleteStmt{
+		Table:  b.meta.Table,
+		Wheres: b.wheres,
+	})
+
+	res, err := b.sess.run.ExecContext(ctx, sqlStr, whereArgs(b.wheres)...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// whereArgs flattens the bound values of a where list in placeholder order.
+func whereArgs(wheres []grammar.WhereClause) []any {
+	var args []any
+	for _, w := range wheres {
+		switch w.Kind {
+		case grammar.WhereBasic:
+			args = append(args, w.Value)
+		case grammar.WhereIn, grammar.WhereNotIn, grammar.WhereBetween, grammar.WhereNotBetween:
+			args = append(args, w.Values...)
+		case grammar.WhereNested:
+			args = append(args, whereArgs(w.Group)...)
+		}
+	}
+	return args
 }

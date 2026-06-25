@@ -18,3 +18,7 @@ func (g SQLite) CompileInsert(s InsertStmt) (string, bool) {
 func (g SQLite) CompileUpdate(s UpdateStmt) string {
 	return compileUpdate(g, s)
 }
+
+func (g SQLite) CompileDelete(s DeleteStmt) string {
+	return compileDelete(g, s)
+}
