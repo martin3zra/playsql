@@ -1,6 +1,9 @@
 package grammar
 
-import "strconv"
+import (
+	"strconv"
+	"strings"
+)
 
 // Postgres grammar. Identifiers wrapped in double quotes, numbered "$n"
 // placeholders.
@@ -28,4 +31,9 @@ func (g Postgres) CompileDelete(s DeleteStmt) string {
 
 func (g Postgres) CompileUpsert(s UpsertStmt) string {
 	return compileUpsert(g, s)
+}
+
+func (g Postgres) JSONExtract(column, path string) string {
+	// col #>> '{a,b}' returns the value at the path as text.
+	return g.Wrap(column) + " #>> '{" + strings.ReplaceAll(path, ".", ",") + "}'"
 }

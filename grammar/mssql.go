@@ -94,6 +94,10 @@ func (g MSSQL) CompileUpsert(s UpsertStmt) string {
 	return sb.String()
 }
 
+func (g MSSQL) JSONExtract(column, path string) string {
+	return "JSON_VALUE(" + g.Wrap(column) + ", '" + jsonPath(path) + "')"
+}
+
 // wrapList joins wrapped column names with ", ".
 func wrapList(g Grammar, cols []string) string {
 	wrapped := make([]string, len(cols))

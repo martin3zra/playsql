@@ -26,3 +26,7 @@ func (g SQLite) CompileDelete(s DeleteStmt) string {
 func (g SQLite) CompileUpsert(s UpsertStmt) string {
 	return compileUpsert(g, s)
 }
+
+func (g SQLite) JSONExtract(column, path string) string {
+	return "json_extract(" + g.Wrap(column) + ", '" + jsonPath(path) + "')"
+}

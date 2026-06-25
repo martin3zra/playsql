@@ -21,6 +21,7 @@ const (
 	WhereBetween                     // Column BETWEEN ? AND ?
 	WhereNotBetween                  // Column NOT BETWEEN ? AND ?
 	WhereNested                      // ( <Group> )
+	WhereJSON                        // <json-extract(Column, Path)> Op ?
 )
 
 // WhereClause is one compiled predicate. All values are bound, never
@@ -30,7 +31,8 @@ type WhereClause struct {
 	Boolean string // "AND" (default) | "OR"
 	Column  string
 	Op      string
-	Value   any           // WhereBasic
+	Path    string        // WhereJSON: dotted path into the JSON column
+	Value   any           // WhereBasic / WhereJSON
 	Values  []any         // WhereIn / WhereNotIn / WhereBetween
 	Group   []WhereClause // WhereNested
 }
@@ -100,6 +102,9 @@ type Grammar interface {
 	CompileUpsert(s UpsertStmt) (sql string)
 	Wrap(identifier string) string
 	Placeholder(n int) string // n is 1-based bind position
+	// JSONExtract renders a SQL expression extracting a value (as text) from a
+	// JSON column at a dotted path, e.g. "prefs" + "theme" -> the dialect form.
+	JSONExtract(column, path string) string
 }
 
 // For returns the grammar for a driver name, or nil if unsupported.
@@ -191,6 +196,15 @@ func compileSelectOffsetFetch(g Grammar, q CompiledQuery) (string, []any) {
 		sql += fmt.Sprintf(" FETCH NEXT %d ROWS ONLY", q.Limit)
 	}
 	return sql, args
+}
+
+// jsonPath turns a dotted path ("a.b") into a SQL/JSON path ("$.a.b"). An empty
+// path is the document root "$".
+func jsonPath(path string) string {
+	if path == "" {
+		return "$"
+	}
+	return "$." + path
 }
 
 // compileDelete builds a DELETE with parameterized WHERE predicates.
@@ -363,6 +377,15 @@ func compileWheres(g Grammar, clauses []WhereClause, n *int) (string, []any) {
 		case WhereBasic:
 			*n++
 			sb.WriteString(g.Wrap(w.Column))
+			sb.WriteByte(' ')
+			sb.WriteString(w.Op)
+			sb.WriteByte(' ')
+			sb.WriteString(g.Placeholder(*n))
+			args = append(args, w.Value)
+
+		case WhereJSON:
+			*n++
+			sb.WriteString(g.JSONExtract(w.Column, w.Path))
 			sb.WriteByte(' ')
 			sb.WriteString(w.Op)
 			sb.WriteByte(' ')

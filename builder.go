@@ -87,6 +87,18 @@ func (b *Builder) WhereNotIn(column string, values ...any) *Builder {
 	return b.add(grammar.WhereClause{Kind: grammar.WhereNotIn, Boolean: "AND", Column: column, Values: expandValues(values)})
 }
 
+// WhereJSON filters on a value inside a JSON column at a dotted path, e.g.
+// WhereJSON("prefs", "theme", "=", "dark") or WhereJSON("addr", "city", "=", x).
+// The extracted value is compared as text.
+func (b *Builder) WhereJSON(column, path, op string, value any) *Builder {
+	return b.add(grammar.WhereClause{Kind: grammar.WhereJSON, Boolean: "AND", Column: column, Path: path, Op: op, Value: value})
+}
+
+// OrWhereJSON is WhereJSON joined with OR.
+func (b *Builder) OrWhereJSON(column, path, op string, value any) *Builder {
+	return b.add(grammar.WhereClause{Kind: grammar.WhereJSON, Boolean: "OR", Column: column, Path: path, Op: op, Value: value})
+}
+
 // WhereNull matches rows where column IS NULL.
 func (b *Builder) WhereNull(column string) *Builder {
 	return b.add(grammar.WhereClause{Kind: grammar.WhereNull, Boolean: "AND", Column: column})
@@ -403,7 +415,7 @@ func whereArgs(wheres []grammar.WhereClause) []any {
 	var args []any
 	for _, w := range wheres {
 		switch w.Kind {
-		case grammar.WhereBasic:
+		case grammar.WhereBasic, grammar.WhereJSON:
 			args = append(args, w.Value)
 		case grammar.WhereIn, grammar.WhereNotIn, grammar.WhereBetween, grammar.WhereNotBetween:
 			args = append(args, w.Values...)

@@ -27,3 +27,8 @@ func (g MySQL) CompileDelete(s DeleteStmt) string {
 func (g MySQL) CompileUpsert(s UpsertStmt) string {
 	return compileUpsertMySQL(g, s)
 }
+
+func (g MySQL) JSONExtract(column, path string) string {
+	// col ->> '$.a.b' returns the value at the path as unquoted text.
+	return g.Wrap(column) + " ->> '" + jsonPath(path) + "'"
+}
