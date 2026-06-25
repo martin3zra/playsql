@@ -11,9 +11,9 @@ import (
 type Driver string
 
 const (
-	SQLite   Driver = "sqlite"
-	Postgres Driver = "postgres"
-	MySQL    Driver = "mysql"
+	SQLite    Driver = "sqlite"
+	Postgres  Driver = "postgres"
+	MySQL     Driver = "mysql"
 	SQLServer Driver = "sqlserver"
 )
 
