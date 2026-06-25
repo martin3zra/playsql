@@ -19,10 +19,12 @@ type ColumnMeta struct {
 
 // ModelMeta is the immutable, parsed description of a model type.
 type ModelMeta struct {
-	Table        string
-	PrimaryKey   string
-	Incrementing bool
-	Columns      []ColumnMeta
+	Table           string
+	PrimaryKey      string
+	Incrementing    bool
+	SoftDeletes     bool
+	DeletedAtColumn string // set when SoftDeletes is true
+	Columns         []ColumnMeta
 
 	fieldByCol map[string]int // db column -> struct field index (scanner hot path)
 }

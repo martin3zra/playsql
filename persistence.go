@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"time"
 
 	"github.com/martin3zra/playsql/grammar"
 	"github.com/martin3zra/playsql/metadata"
@@ -115,31 +116,113 @@ func (s *session) Save(ctx context.Context, model any) error {
 	return s.Update(ctx, model)
 }
 
-// Delete removes the row matching the model's primary key. The key must be set.
+// Delete removes the row matching the model's primary key. For a soft-deletable
+// model this sets deleted_at; use ForceDelete for a hard delete. The key must
+// be set.
 func (s *session) Delete(ctx context.Context, model any) error {
 	meta, elem, err := structValue(model)
 	if err != nil {
 		return err
 	}
-
-	pkIdx, ok := meta.PrimaryKeyFieldIndex()
-	if !ok {
-		return fmt.Errorf("playsql: model %q has no primary key", meta.Table)
+	pkVal, err := requirePK(meta, elem)
+	if err != nil {
+		return err
 	}
-	if elem.Field(pkIdx).IsZero() {
-		return fmt.Errorf("playsql: Delete requires a non-zero primary key")
-	}
-	pkVal := elem.Field(pkIdx).Interface()
 
+	if meta.SoftDeletes {
+		now := time.Now()
+		sqlStr := s.grammar.CompileUpdate(grammar.UpdateStmt{
+			Table:   meta.Table,
+			Columns: []string{meta.DeletedAtColumn},
+			Wheres:  []grammar.WhereClause{{Kind: grammar.WhereBasic, Column: meta.PrimaryKey, Op: "=", Value: pkVal}},
+		})
+		if _, err := s.run.ExecContext(ctx, sqlStr, now, pkVal); err != nil {
+			return err
+		}
+		setDeletedAt(elem, meta, &now)
+		return nil
+	}
+
+	return s.hardDelete(ctx, meta, pkVal)
+}
+
+// ForceDelete permanently removes the row, ignoring soft-delete.
+func (s *session) ForceDelete(ctx context.Context, model any) error {
+	meta, elem, err := structValue(model)
+	if err != nil {
+		return err
+	}
+	pkVal, err := requirePK(meta, elem)
+	if err != nil {
+		return err
+	}
+	return s.hardDelete(ctx, meta, pkVal)
+}
+
+// Restore clears deleted_at on a soft-deleted row.
+func (s *session) Restore(ctx context.Context, model any) error {
+	meta, elem, err := structValue(model)
+	if err != nil {
+		return err
+	}
+	if !meta.SoftDeletes {
+		return ErrNotSoftDeletable
+	}
+	pkVal, err := requirePK(meta, elem)
+	if err != nil {
+		return err
+	}
+
+	sqlStr := s.grammar.CompileUpdate(grammar.UpdateStmt{
+		Table:   meta.Table,
+		Columns: []string{meta.DeletedAtColumn},
+		Wheres:  []grammar.WhereClause{{Kind: grammar.WhereBasic, Column: meta.PrimaryKey, Op: "=", Value: pkVal}},
+	})
+	if _, err := s.run.ExecContext(ctx, sqlStr, nil, pkVal); err != nil {
+		return err
+	}
+	setDeletedAt(elem, meta, nil)
+	return nil
+}
+
+func (s *session) hardDelete(ctx context.Context, meta *metadata.ModelMeta, pkVal any) error {
 	sqlStr := s.grammar.CompileDelete(grammar.DeleteStmt{
 		Table: meta.Table,
 		Wheres: []grammar.WhereClause{
 			{Kind: grammar.WhereBasic, Column: meta.PrimaryKey, Op: "=", Value: pkVal},
 		},
 	})
-
-	_, err = s.run.ExecContext(ctx, sqlStr, pkVal)
+	_, err := s.run.ExecContext(ctx, sqlStr, pkVal)
 	return err
+}
+
+// requirePK returns the model's primary-key value, erroring when it is unset.
+func requirePK(meta *metadata.ModelMeta, elem reflect.Value) (any, error) {
+	pkIdx, ok := meta.PrimaryKeyFieldIndex()
+	if !ok {
+		return nil, fmt.Errorf("playsql: model %q has no primary key", meta.Table)
+	}
+	if elem.Field(pkIdx).IsZero() {
+		return nil, fmt.Errorf("playsql: operation requires a non-zero primary key")
+	}
+	return elem.Field(pkIdx).Interface(), nil
+}
+
+// setDeletedAt writes the deleted_at field back onto the struct when present and
+// settable (*time.Time). Best-effort; ignored for other field types.
+func setDeletedAt(elem reflect.Value, meta *metadata.ModelMeta, t *time.Time) {
+	idx, ok := meta.FieldIndexByColumn(meta.DeletedAtColumn)
+	if !ok {
+		return
+	}
+	f := elem.Field(idx)
+	if f.Kind() == reflect.Ptr && f.Type().Elem() == reflect.TypeOf(time.Time{}) && f.CanSet() {
+		if t == nil {
+			f.Set(reflect.Zero(f.Type()))
+		} else {
+			f.Set(reflect.ValueOf(t))
+		}
+	}
 }
 
 // structValue resolves model to its metadata and addressable struct value.

@@ -60,6 +60,9 @@ func parse(t reflect.Type) *ModelMeta {
 					pkKind = f.Type.Kind()
 				case "incrementing":
 					explicitIncrement = true
+				case "softdelete":
+					m.SoftDeletes = true
+					m.DeletedAtColumn = col
 				}
 			}
 		}

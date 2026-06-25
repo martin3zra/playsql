@@ -3,6 +3,7 @@ package playsql
 import (
 	"context"
 	"reflect"
+	"time"
 
 	"github.com/martin3zra/playsql/grammar"
 	"github.com/martin3zra/playsql/metadata"
@@ -18,6 +19,15 @@ const (
 	Desc Direction = "DESC"
 )
 
+// trashedMode controls how soft-deleted rows are treated in a query.
+type trashedMode int
+
+const (
+	trashedExclude trashedMode = iota // default: hide soft-deleted rows
+	trashedInclude                    // WithTrashed: include them
+	trashedOnly                       // OnlyTrashed: only soft-deleted rows
+)
+
 type Builder struct {
 	sess    *session
 	meta    *metadata.ModelMeta
@@ -26,6 +36,7 @@ type Builder struct {
 	orders  []grammar.OrderClause
 	limit   int
 	offset  int
+	trashed trashedMode
 	err     error // first construction error; surfaced by terminal ops
 }
 
@@ -136,6 +147,46 @@ func expandValues(values []any) []any {
 	return out
 }
 
+// WithTrashed includes soft-deleted rows in the query.
+func (b *Builder) WithTrashed() *Builder { b.trashed = trashedInclude; return b }
+
+// OnlyTrashed restricts the query to soft-deleted rows.
+func (b *Builder) OnlyTrashed() *Builder { b.trashed = trashedOnly; return b }
+
+// softDeletePredicate returns the deleted_at filter for the current trashed mode,
+// or nil when none applies (not soft-deletable, or WithTrashed).
+func (b *Builder) softDeletePredicate(mode trashedMode) *grammar.WhereClause {
+	if !b.meta.SoftDeletes {
+		return nil
+	}
+	switch mode {
+	case trashedExclude:
+		return &grammar.WhereClause{Kind: grammar.WhereNull, Column: b.meta.DeletedAtColumn}
+	case trashedOnly:
+		return &grammar.WhereClause{Kind: grammar.WhereNotNull, Column: b.meta.DeletedAtColumn}
+	default: // trashedInclude
+		return nil
+	}
+}
+
+// effectiveWheres prepends the soft-delete predicate (if any) and wraps the
+// user predicates in a group so precedence stays correct:
+//
+//	deleted_at IS NULL AND ( <user wheres> )
+func (b *Builder) effectiveWheres(mode trashedMode) []grammar.WhereClause {
+	pred := b.softDeletePredicate(mode)
+	if pred == nil {
+		return b.wheres
+	}
+	if len(b.wheres) == 0 {
+		return []grammar.WhereClause{*pred}
+	}
+	return []grammar.WhereClause{
+		*pred,
+		{Kind: grammar.WhereNested, Boolean: "AND", Group: b.wheres},
+	}
+}
+
 // OrderBy adds an ORDER BY term. Call repeatedly for multiple sort keys.
 func (b *Builder) OrderBy(column string, dir Direction) *Builder {
 	b.orders = append(b.orders, grammar.OrderClause{Column: column, Direction: string(dir)})
@@ -163,7 +214,7 @@ func (b *Builder) compiled() grammar.CompiledQuery {
 	return grammar.CompiledQuery{
 		Table:   b.meta.Table,
 		Columns: cols,
-		Wheres:  b.wheres,
+		Wheres:  b.effectiveWheres(b.trashed),
 		Orders:  b.orders,
 		Limit:   b.limit,
 		Offset:  b.offset,
@@ -234,19 +285,72 @@ func (b *Builder) Count(ctx context.Context) (int64, error) {
 	return count, nil
 }
 
-// Delete removes all matching rows and returns the number affected. With no
-// WHERE constraints this deletes every row in the table.
+// Delete removes all matching rows and returns the number affected. For a
+// soft-deletable model this sets deleted_at instead of removing the row; use
+// ForceDelete for a hard delete. With no WHERE constraints this affects every
+// (non-trashed) row.
 func (b *Builder) Delete(ctx context.Context) (int64, error) {
 	if b.err != nil {
 		return 0, b.err
 	}
 
+	if b.meta.SoftDeletes {
+		// Soft delete: stamp deleted_at on rows not already trashed.
+		wheres := b.effectiveWheres(trashedExclude)
+		sqlStr := b.sess.grammar.CompileUpdate(grammar.UpdateStmt{
+			Table:   b.meta.Table,
+			Columns: []string{b.meta.DeletedAtColumn},
+			Wheres:  wheres,
+		})
+		args := append([]any{time.Now()}, whereArgs(wheres)...)
+		res, err := b.sess.run.ExecContext(ctx, sqlStr, args...)
+		if err != nil {
+			return 0, err
+		}
+		return res.RowsAffected()
+	}
+
+	return b.hardDelete(ctx)
+}
+
+// ForceDelete permanently removes all matching rows, ignoring soft-delete.
+func (b *Builder) ForceDelete(ctx context.Context) (int64, error) {
+	if b.err != nil {
+		return 0, b.err
+	}
+	return b.hardDelete(ctx)
+}
+
+func (b *Builder) hardDelete(ctx context.Context) (int64, error) {
 	sqlStr := b.sess.grammar.CompileDelete(grammar.DeleteStmt{
 		Table:  b.meta.Table,
 		Wheres: b.wheres,
 	})
-
 	res, err := b.sess.run.ExecContext(ctx, sqlStr, whereArgs(b.wheres)...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// Restore clears deleted_at on matching soft-deleted rows.
+func (b *Builder) Restore(ctx context.Context) (int64, error) {
+	if b.err != nil {
+		return 0, b.err
+	}
+	if !b.meta.SoftDeletes {
+		return 0, ErrNotSoftDeletable
+	}
+
+	// Operate on trashed rows regardless of the builder's trashed mode.
+	wheres := b.effectiveWheres(trashedOnly)
+	sqlStr := b.sess.grammar.CompileUpdate(grammar.UpdateStmt{
+		Table:   b.meta.Table,
+		Columns: []string{b.meta.DeletedAtColumn},
+		Wheres:  wheres,
+	})
+	args := append([]any{nil}, whereArgs(wheres)...)
+	res, err := b.sess.run.ExecContext(ctx, sqlStr, args...)
 	if err != nil {
 		return 0, err
 	}
