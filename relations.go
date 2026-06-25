@@ -24,26 +24,52 @@ func (b *Builder) loadRelations(ctx context.Context, dest any) error {
 		return nil
 	}
 
-	for _, name := range b.withs {
-		rel, ok := b.meta.Relations[name]
-		if !ok {
-			return fmt.Errorf("playsql: unknown relation %q on %s", name, b.meta.StructName)
-		}
-		if err := b.loadRelation(ctx, parents, rel); err != nil {
+	for _, wc := range b.withs {
+		if err := b.loadPath(ctx, parents, b.meta, wc.segments, wc.constraint); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (b *Builder) loadRelation(ctx context.Context, parents []reflect.Value, rel metadata.RelationMeta) error {
+// loadPath loads one (possibly dotted) relation path. It loads the first
+// segment onto parents, then recurses into the loaded children for the rest.
+// The constraint applies only to the deepest segment's query.
+func (b *Builder) loadPath(ctx context.Context, parents []reflect.Value, parentMeta *metadata.ModelMeta, segments []string, constraint func(*Builder)) error {
+	name := segments[0]
+	rel, ok := parentMeta.Relations[name]
+	if !ok {
+		return fmt.Errorf("playsql: unknown relation %q on %s", name, parentMeta.StructName)
+	}
+
+	last := len(segments) == 1
+	var cons func(*Builder)
+	if last {
+		cons = constraint
+	}
+	if err := b.loadRelation(ctx, parents, parentMeta, rel, cons); err != nil {
+		return err
+	}
+	if last {
+		return nil
+	}
+
+	children := collectChildren(parents, rel.FieldIndex)
+	if len(children) == 0 {
+		return nil
+	}
+	childMeta := metadata.For(reflect.New(rel.RelatedType).Interface())
+	return b.loadPath(ctx, children, childMeta, segments[1:], constraint)
+}
+
+func (b *Builder) loadRelation(ctx context.Context, parents []reflect.Value, parentMeta *metadata.ModelMeta, rel metadata.RelationMeta, constraint func(*Builder)) error {
 	relatedMeta := metadata.For(reflect.New(rel.RelatedType).Interface())
-	foreignKey, otherKey := metadata.ResolveRelationKeys(b.meta, rel, relatedMeta)
+	foreignKey, otherKey := metadata.ResolveRelationKeys(parentMeta, rel, relatedMeta)
 
 	switch rel.Kind {
 	case metadata.HasMany, metadata.HasOne:
 		// parent[otherKey] (local key) === child[foreignKey]
-		parentKeyIdx, ok := b.meta.FieldIndexByColumn(otherKey)
+		parentKeyIdx, ok := parentMeta.FieldIndexByColumn(otherKey)
 		if !ok {
 			return fmt.Errorf("playsql: relation %q: local key column %q not found", rel.Name, otherKey)
 		}
@@ -52,7 +78,7 @@ func (b *Builder) loadRelation(ctx context.Context, parents []reflect.Value, rel
 			return fmt.Errorf("playsql: relation %q: foreign key column %q not found on %s", rel.Name, foreignKey, relatedMeta.StructName)
 		}
 
-		children, err := b.queryRelated(ctx, rel.RelatedType, foreignKey, distinctKeys(parents, parentKeyIdx))
+		children, err := b.queryRelated(ctx, rel.RelatedType, foreignKey, distinctKeys(parents, parentKeyIdx), constraint)
 		if err != nil {
 			return err
 		}
@@ -71,16 +97,16 @@ func (b *Builder) loadRelation(ctx context.Context, parents []reflect.Value, rel
 
 	case metadata.BelongsTo:
 		// parent[foreignKey] === related[otherKey] (owner key)
-		childFKIdx, ok := b.meta.FieldIndexByColumn(foreignKey)
+		childFKIdx, ok := parentMeta.FieldIndexByColumn(foreignKey)
 		if !ok {
-			return fmt.Errorf("playsql: relation %q: foreign key column %q not found on %s", rel.Name, foreignKey, b.meta.StructName)
+			return fmt.Errorf("playsql: relation %q: foreign key column %q not found on %s", rel.Name, foreignKey, parentMeta.StructName)
 		}
 		ownerKeyIdx, ok := relatedMeta.FieldIndexByColumn(otherKey)
 		if !ok {
 			return fmt.Errorf("playsql: relation %q: owner key column %q not found on %s", rel.Name, otherKey, relatedMeta.StructName)
 		}
 
-		owners, err := b.queryRelated(ctx, rel.RelatedType, otherKey, distinctKeys(parents, childFKIdx))
+		owners, err := b.queryRelated(ctx, rel.RelatedType, otherKey, distinctKeys(parents, childFKIdx), constraint)
 		if err != nil {
 			return err
 		}
@@ -98,7 +124,7 @@ func (b *Builder) loadRelation(ctx context.Context, parents []reflect.Value, rel
 		}
 
 	case metadata.BelongsToMany:
-		return b.loadBelongsToMany(ctx, parents, rel, relatedMeta)
+		return b.loadBelongsToMany(ctx, parents, parentMeta, rel, relatedMeta, constraint)
 	}
 
 	return nil
@@ -106,10 +132,10 @@ func (b *Builder) loadRelation(ctx context.Context, parents []reflect.Value, rel
 
 // loadBelongsToMany resolves a many-to-many relation in three batched queries:
 // parents (already loaded) -> pivot rows -> related rows.
-func (b *Builder) loadBelongsToMany(ctx context.Context, parents []reflect.Value, rel metadata.RelationMeta, relatedMeta *metadata.ModelMeta) error {
-	pivotTable, fpk, rpk, parentKey, relatedKey := metadata.ResolvePivot(b.meta, rel, relatedMeta)
+func (b *Builder) loadBelongsToMany(ctx context.Context, parents []reflect.Value, parentMeta *metadata.ModelMeta, rel metadata.RelationMeta, relatedMeta *metadata.ModelMeta, constraint func(*Builder)) error {
+	pivotTable, fpk, rpk, parentKey, relatedKey := metadata.ResolvePivot(parentMeta, rel, relatedMeta)
 
-	parentKeyIdx, ok := b.meta.FieldIndexByColumn(parentKey)
+	parentKeyIdx, ok := parentMeta.FieldIndexByColumn(parentKey)
 	if !ok {
 		return fmt.Errorf("playsql: relation %q: parent key column %q not found", rel.Name, parentKey)
 	}
@@ -133,7 +159,7 @@ func (b *Builder) loadBelongsToMany(ctx context.Context, parents []reflect.Value
 			relatedKeys = append(relatedKeys, pr.related)
 		}
 	}
-	related, err := b.queryRelated(ctx, rel.RelatedType, relatedKey, relatedKeys)
+	related, err := b.queryRelated(ctx, rel.RelatedType, relatedKey, relatedKeys, constraint)
 	if err != nil {
 		return err
 	}
@@ -186,16 +212,48 @@ func (b *Builder) queryPivot(ctx context.Context, table, fpk, rpk string, parent
 	return pairs, rows.Err()
 }
 
-// queryRelated fetches related rows where whereCol IN keys, returning the result
-// slice (a reflect []relatedType value).
-func (b *Builder) queryRelated(ctx context.Context, relatedType reflect.Type, whereCol string, keys []any) (reflect.Value, error) {
+// queryRelated fetches related rows where whereCol IN keys, applying an optional
+// constraint, and returns the result slice (a reflect []relatedType value).
+func (b *Builder) queryRelated(ctx context.Context, relatedType reflect.Type, whereCol string, keys []any, constraint func(*Builder)) (reflect.Value, error) {
 	destPtr := reflect.New(reflect.SliceOf(relatedType)) // *[]Related
 	rb := newBuilder(b.sess, reflect.New(relatedType).Interface())
 	rb.WhereIn(whereCol, keys...)
+	if constraint != nil {
+		constraint(rb)
+	}
 	if err := rb.Get(ctx, destPtr.Interface()); err != nil {
 		return reflect.Value{}, err
 	}
 	return destPtr.Elem(), nil
+}
+
+// collectChildren gathers the loaded related struct values from a relation field
+// across parents, for recursing into nested eager loads.
+func collectChildren(parents []reflect.Value, fieldIdx int) []reflect.Value {
+	var out []reflect.Value
+	for _, p := range parents {
+		f := p.Field(fieldIdx)
+		switch f.Kind() {
+		case reflect.Slice:
+			for j := 0; j < f.Len(); j++ {
+				e := f.Index(j)
+				if e.Kind() == reflect.Ptr {
+					if e.IsNil() {
+						continue
+					}
+					e = e.Elem()
+				}
+				out = append(out, e)
+			}
+		case reflect.Ptr:
+			if !f.IsNil() {
+				out = append(out, f.Elem())
+			}
+		case reflect.Struct:
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // collectParents normalizes dest into a slice of settable struct values.

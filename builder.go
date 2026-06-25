@@ -3,6 +3,7 @@ package playsql
 import (
 	"context"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/martin3zra/playsql/grammar"
@@ -34,7 +35,7 @@ type Builder struct {
 	columns []string
 	wheres  []grammar.WhereClause
 	orders  []grammar.OrderClause
-	withs   []string
+	withs   []withClause
 	limit   int
 	offset  int
 	trashed trashedMode
@@ -148,10 +149,31 @@ func expandValues(values []any) []any {
 	return out
 }
 
-// With eager-loads the named relationships (struct field names) after the query
-// runs, batching each with a single WhereIn to avoid N+1.
+// withClause is one requested eager load: a dotted path of relation field names
+// and an optional constraint applied to the deepest relation's query.
+type withClause struct {
+	segments   []string
+	constraint func(*Builder)
+}
+
+// With eager-loads the named relationships after the query runs, batching each
+// with a single WhereIn to avoid N+1. Names may be dotted for nesting, e.g.
+// With("Comments.Author") loads each blog's comments and each comment's author.
 func (b *Builder) With(relations ...string) *Builder {
-	b.withs = append(b.withs, relations...)
+	for _, r := range relations {
+		b.withs = append(b.withs, withClause{segments: strings.Split(r, ".")})
+	}
+	return b
+}
+
+// WithConstraint eager-loads a single relationship (dotted path allowed),
+// applying fn to the related query — e.g. to filter or order the loaded rows:
+//
+//	WithConstraint("Comments", func(q *playsql.Builder) {
+//		q.WhereEq("approved", true).OrderBy("id", playsql.Desc)
+//	})
+func (b *Builder) WithConstraint(name string, fn func(*Builder)) *Builder {
+	b.withs = append(b.withs, withClause{segments: strings.Split(name, "."), constraint: fn})
 	return b
 }
 
