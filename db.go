@@ -112,10 +112,12 @@ func isSQLite(driver string) bool {
 	return driver == "sqlite" || driver == "sqlite3"
 }
 
-// resolveDriverName maps a requested driver name to one actually registered with
-// database/sql. For the SQL Server aliases it prefers the requested name, then
-// falls back to its sibling, so either "mssql" or "sqlserver" works regardless
-// of which driver fork the caller imported.
+// resolveDriverName maps a SQL Server config name to a registered driver that
+// uses @pN placeholders, which the MSSQL grammar emits. go-mssqldb registers
+// both "sqlserver" (native @pN) and "mssql" (legacy, expects ? placeholders), so
+// we must always pick "sqlserver" — even when the config says "mssql" — or the
+// @pN statements fail to bind. Falls back to "mssql" only if that is the only
+// one registered. Non-SQL-Server drivers pass through unchanged.
 func resolveDriverName(driver string) string {
 	if driver != "mssql" && driver != "sqlserver" {
 		return driver
@@ -124,12 +126,9 @@ func resolveDriverName(driver string) string {
 	for _, d := range sql.Drivers() {
 		registered[d] = true
 	}
-	if registered[driver] {
-		return driver
-	}
-	for _, alt := range []string{"sqlserver", "mssql"} {
-		if registered[alt] {
-			return alt
+	for _, prefer := range []string{"sqlserver", "mssql"} {
+		if registered[prefer] {
+			return prefer
 		}
 	}
 	return driver // neither registered; let sql.Open report it
