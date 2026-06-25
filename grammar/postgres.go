@@ -25,3 +25,7 @@ func (g Postgres) CompileUpdate(s UpdateStmt) string {
 func (g Postgres) CompileDelete(s DeleteStmt) string {
 	return compileDelete(g, s)
 }
+
+func (g Postgres) CompileUpsert(s UpsertStmt) string {
+	return compileUpsert(g, s)
+}

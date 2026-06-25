@@ -79,6 +79,16 @@ type UpdateStmt struct {
 	Wheres  []WhereClause
 }
 
+// UpsertStmt describes an INSERT ... ON CONFLICT DO UPDATE. UpdateColumns empty
+// means DO NOTHING on conflict.
+type UpsertStmt struct {
+	Table           string
+	Columns         []string
+	Rows            int
+	ConflictColumns []string
+	UpdateColumns   []string
+}
+
 // Grammar generates SQL for a specific driver.
 type Grammar interface {
 	CompileSelect(q CompiledQuery) (sql string, args []any)
@@ -87,6 +97,7 @@ type Grammar interface {
 	CompileInsert(s InsertStmt) (sql string, returnsID bool)
 	CompileUpdate(s UpdateStmt) (sql string)
 	CompileDelete(s DeleteStmt) (sql string)
+	CompileUpsert(s UpsertStmt) (sql string)
 	Wrap(identifier string) string
 	Placeholder(n int) string // n is 1-based bind position
 }
@@ -212,6 +223,68 @@ func compileInsert(g Grammar, s InsertStmt, returning bool) (string, bool) {
 		returnsID = true
 	}
 	return sb.String(), returnsID
+}
+
+// compileUpsert builds INSERT ... ON CONFLICT (cols) DO UPDATE SET c = EXCLUDED.c
+// (the Postgres/SQLite form). Empty UpdateColumns yields DO NOTHING.
+func compileUpsert(g Grammar, s UpsertStmt) string {
+	var sb strings.Builder
+	sb.WriteString("INSERT INTO ")
+	sb.WriteString(g.Wrap(s.Table))
+	sb.WriteString(" (")
+	for i, c := range s.Columns {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString(g.Wrap(c))
+	}
+	sb.WriteString(") VALUES ")
+
+	rows := s.Rows
+	if rows < 1 {
+		rows = 1
+	}
+	n := 0
+	for r := 0; r < rows; r++ {
+		if r > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteByte('(')
+		for c := range s.Columns {
+			if c > 0 {
+				sb.WriteString(", ")
+			}
+			n++
+			sb.WriteString(g.Placeholder(n))
+		}
+		sb.WriteByte(')')
+	}
+
+	sb.WriteString(" ON CONFLICT (")
+	for i, c := range s.ConflictColumns {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString(g.Wrap(c))
+	}
+	sb.WriteByte(')')
+
+	if len(s.UpdateColumns) == 0 {
+		sb.WriteString(" DO NOTHING")
+		return sb.String()
+	}
+
+	sb.WriteString(" DO UPDATE SET ")
+	for i, c := range s.UpdateColumns {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		w := g.Wrap(c)
+		sb.WriteString(w)
+		sb.WriteString(" = EXCLUDED.")
+		sb.WriteString(w)
+	}
+	return sb.String()
 }
 
 // compileUpdate builds an UPDATE, numbering placeholders contiguously across the

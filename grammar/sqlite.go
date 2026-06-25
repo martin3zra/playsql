@@ -22,3 +22,7 @@ func (g SQLite) CompileUpdate(s UpdateStmt) string {
 func (g SQLite) CompileDelete(s DeleteStmt) string {
 	return compileDelete(g, s)
 }
+
+func (g SQLite) CompileUpsert(s UpsertStmt) string {
+	return compileUpsert(g, s)
+}

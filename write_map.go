@@ -81,45 +81,11 @@ func (b *Builder) InsertMany(ctx context.Context, rows []map[string]any) (int64,
 		return 0, nil
 	}
 
-	// Build the sorted union of fillable columns.
-	set := map[string]bool{}
-	for _, row := range rows {
-		for k := range row {
-			if b.meta.CanFill(k) {
-				set[k] = true
-			}
-		}
-	}
-	now := time.Now()
-	stamp := map[string]bool{}
-	for _, c := range []string{b.meta.CreatedAtColumn, b.meta.UpdatedAtColumn} {
-		if c != "" {
-			set[c] = true
-			stamp[c] = true
-		}
-	}
-	if len(set) == 0 {
+	cols, stamp := b.unionColumns(rows)
+	if len(cols) == 0 {
 		return 0, fmt.Errorf("playsql: InsertMany: no fillable columns in data")
 	}
-
-	cols := make([]string, 0, len(set))
-	for c := range set {
-		cols = append(cols, c)
-	}
-	sort.Strings(cols)
-
-	// Row-major values.
-	var vals []any
-	for _, row := range rows {
-		for _, c := range cols {
-			switch {
-			case stamp[c]:
-				vals = append(vals, now)
-			default:
-				vals = append(vals, row[c]) // missing key -> nil -> NULL
-			}
-		}
-	}
+	vals := b.rowValues(rows, cols, stamp, time.Now())
 
 	sqlStr, _ := b.sess.grammar.CompileInsert(grammar.InsertStmt{
 		Table:        b.meta.Table,
@@ -133,6 +99,93 @@ func (b *Builder) InsertMany(ctx context.Context, rows []map[string]any) (int64,
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// Upsert inserts rows, and on a conflict over conflictColumns updates
+// updateColumns (DO UPDATE SET col = EXCLUDED.col). If updateColumns is nil it
+// defaults to every inserted column except the conflict columns and created_at;
+// an explicit empty slice means DO NOTHING on conflict. Keys are filtered by
+// fillable/guarded; created_at/updated_at are stamped.
+func (b *Builder) Upsert(ctx context.Context, rows []map[string]any, conflictColumns, updateColumns []string) (int64, error) {
+	if b.err != nil {
+		return 0, b.err
+	}
+	if len(rows) == 0 {
+		return 0, nil
+	}
+	if len(conflictColumns) == 0 {
+		return 0, fmt.Errorf("playsql: Upsert requires at least one conflict column")
+	}
+
+	cols, stamp := b.unionColumns(rows)
+	if len(cols) == 0 {
+		return 0, fmt.Errorf("playsql: Upsert: no fillable columns in data")
+	}
+	vals := b.rowValues(rows, cols, stamp, time.Now())
+
+	if updateColumns == nil {
+		for _, c := range cols {
+			if contains(conflictColumns, c) || c == b.meta.CreatedAtColumn {
+				continue
+			}
+			updateColumns = append(updateColumns, c)
+		}
+	}
+
+	sqlStr := b.sess.grammar.CompileUpsert(grammar.UpsertStmt{
+		Table:           b.meta.Table,
+		Columns:         cols,
+		Rows:            len(rows),
+		ConflictColumns: conflictColumns,
+		UpdateColumns:   updateColumns,
+	})
+
+	res, err := b.sess.run.ExecContext(ctx, sqlStr, vals...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// unionColumns returns the sorted union of fillable columns across rows, plus
+// the timestamp columns; stamp marks which are timestamp columns.
+func (b *Builder) unionColumns(rows []map[string]any) (cols []string, stamp map[string]bool) {
+	set := map[string]bool{}
+	for _, row := range rows {
+		for k := range row {
+			if b.meta.CanFill(k) {
+				set[k] = true
+			}
+		}
+	}
+	stamp = map[string]bool{}
+	for _, c := range []string{b.meta.CreatedAtColumn, b.meta.UpdatedAtColumn} {
+		if c != "" {
+			set[c] = true
+			stamp[c] = true
+		}
+	}
+	for c := range set {
+		cols = append(cols, c)
+	}
+	sort.Strings(cols)
+	return cols, stamp
+}
+
+// rowValues flattens rows into row-major values for the given column order,
+// substituting now for timestamp columns and NULL for missing keys.
+func (b *Builder) rowValues(rows []map[string]any, cols []string, stamp map[string]bool, now time.Time) []any {
+	vals := make([]any, 0, len(rows)*len(cols))
+	for _, row := range rows {
+		for _, c := range cols {
+			if stamp[c] {
+				vals = append(vals, now)
+			} else {
+				vals = append(vals, row[c])
+			}
+		}
+	}
+	return vals
 }
 
 // execInsert compiles and runs a single-row insert, returning the new id.
