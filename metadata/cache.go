@@ -21,13 +21,14 @@ type ColumnMeta struct {
 type RelationKind string
 
 const (
-	HasMany   RelationKind = "hasMany"
-	HasOne    RelationKind = "hasOne"
-	BelongsTo RelationKind = "belongsTo"
+	HasMany       RelationKind = "hasMany"
+	HasOne        RelationKind = "hasOne"
+	BelongsTo     RelationKind = "belongsTo"
+	BelongsToMany RelationKind = "belongsToMany"
 )
 
 // RelationMeta describes one relationship field on a model. Keys may be empty
-// (resolved by convention via ResolveRelationKeys at load time).
+// (resolved by convention via ResolveRelationKeys/ResolvePivot at load time).
 type RelationMeta struct {
 	Name        string // struct field name (the With() key)
 	Kind        RelationKind
@@ -35,6 +36,11 @@ type RelationMeta struct {
 	RelatedType reflect.Type // the related struct type (slice/pointer unwrapped)
 	ForeignKey  string       // explicit override
 	LocalKey    string       // explicit override (local key / owner key)
+
+	// belongsToMany only:
+	PivotTable      string
+	ForeignPivotKey string // parent's key column in the pivot
+	RelatedPivotKey string // related's key column in the pivot
 }
 
 // ModelMeta is the immutable, parsed description of a model type.
@@ -80,6 +86,34 @@ func ResolveRelationKeys(parent *ModelMeta, rel RelationMeta, related *ModelMeta
 		}
 	}
 	return foreignKey, otherKey
+}
+
+// ResolvePivot fills in belongsToMany conventions. The pivot table defaults to
+// the two singular model names joined alphabetically (role_user); the pivot key
+// columns default to <model>_id; the join keys default to each model's PK.
+func ResolvePivot(parent *ModelMeta, rel RelationMeta, related *ModelMeta) (pivotTable, foreignPivotKey, relatedPivotKey, parentKey, relatedKey string) {
+	pSnake := snake(parent.StructName)
+	rSnake := snake(related.StructName)
+
+	pivotTable = rel.PivotTable
+	if pivotTable == "" {
+		if pSnake < rSnake {
+			pivotTable = pSnake + "_" + rSnake
+		} else {
+			pivotTable = rSnake + "_" + pSnake
+		}
+	}
+	foreignPivotKey = rel.ForeignPivotKey
+	if foreignPivotKey == "" {
+		foreignPivotKey = pSnake + "_id"
+	}
+	relatedPivotKey = rel.RelatedPivotKey
+	if relatedPivotKey == "" {
+		relatedPivotKey = rSnake + "_id"
+	}
+	parentKey = parent.PrimaryKey
+	relatedKey = related.PrimaryKey
+	return
 }
 
 // CanFill reports whether a column may be mass-assigned from a map. Fillable is

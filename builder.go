@@ -241,12 +241,15 @@ func (b *Builder) Get(ctx context.Context, dest any) error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 
-	if err := scanRows(rows, dest, b.meta); err != nil {
-		return err
+	err = scanRows(rows, dest, b.meta)
+	if err == nil {
+		err = rows.Err()
 	}
-	if err := rows.Err(); err != nil {
+	// Release the connection before eager-loading so relation queries can run
+	// even on a single-connection pool (e.g. in-memory SQLite).
+	rows.Close()
+	if err != nil {
 		return err
 	}
 	return b.loadRelations(ctx, dest)
@@ -266,9 +269,11 @@ func (b *Builder) First(ctx context.Context, dest any) error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 
-	if err := scanOne(rows, dest, b.meta); err != nil {
+	err = scanOne(rows, dest, b.meta)
+	// Release the connection before eager-loading (see Get).
+	rows.Close()
+	if err != nil {
 		return err
 	}
 	return b.loadRelations(ctx, dest)

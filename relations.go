@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 
+	"github.com/martin3zra/playsql/grammar"
 	"github.com/martin3zra/playsql/metadata"
 )
 
@@ -95,9 +96,94 @@ func (b *Builder) loadRelation(ctx context.Context, parents []reflect.Value, rel
 				assignOne(p.Field(rel.FieldIndex), o)
 			}
 		}
+
+	case metadata.BelongsToMany:
+		return b.loadBelongsToMany(ctx, parents, rel, relatedMeta)
 	}
 
 	return nil
+}
+
+// loadBelongsToMany resolves a many-to-many relation in three batched queries:
+// parents (already loaded) -> pivot rows -> related rows.
+func (b *Builder) loadBelongsToMany(ctx context.Context, parents []reflect.Value, rel metadata.RelationMeta, relatedMeta *metadata.ModelMeta) error {
+	pivotTable, fpk, rpk, parentKey, relatedKey := metadata.ResolvePivot(b.meta, rel, relatedMeta)
+
+	parentKeyIdx, ok := b.meta.FieldIndexByColumn(parentKey)
+	if !ok {
+		return fmt.Errorf("playsql: relation %q: parent key column %q not found", rel.Name, parentKey)
+	}
+	relatedKeyIdx, ok := relatedMeta.FieldIndexByColumn(relatedKey)
+	if !ok {
+		return fmt.Errorf("playsql: relation %q: related key column %q not found", rel.Name, relatedKey)
+	}
+
+	// 1. pivot rows for these parents.
+	pairs, err := b.queryPivot(ctx, pivotTable, fpk, rpk, distinctKeys(parents, parentKeyIdx))
+	if err != nil {
+		return err
+	}
+
+	// 2. related rows for the pivot's related keys.
+	relatedKeys := make([]any, 0, len(pairs))
+	seen := map[any]bool{}
+	for _, pr := range pairs {
+		if !seen[pr.related] {
+			seen[pr.related] = true
+			relatedKeys = append(relatedKeys, pr.related)
+		}
+	}
+	related, err := b.queryRelated(ctx, rel.RelatedType, relatedKey, relatedKeys)
+	if err != nil {
+		return err
+	}
+	relIndex := map[any]reflect.Value{}
+	for j := 0; j < related.Len(); j++ {
+		r := related.Index(j)
+		relIndex[r.Field(relatedKeyIdx).Interface()] = r
+	}
+
+	// 3. group related by parent key via the pivot, then assign.
+	groups := map[any][]reflect.Value{}
+	for _, pr := range pairs {
+		if r, ok := relIndex[pr.related]; ok {
+			groups[pr.parent] = append(groups[pr.parent], r)
+		}
+	}
+	for _, p := range parents {
+		matches := groups[p.Field(parentKeyIdx).Interface()]
+		assignChildren(p.Field(rel.FieldIndex), matches, metadata.HasMany)
+	}
+
+	return nil
+}
+
+type pivotPair struct{ parent, related any }
+
+// queryPivot reads (foreignPivotKey, relatedPivotKey) pairs from the pivot table
+// for the given parent keys.
+func (b *Builder) queryPivot(ctx context.Context, table, fpk, rpk string, parentKeys []any) ([]pivotPair, error) {
+	sqlStr, args := b.sess.grammar.CompileSelect(grammar.CompiledQuery{
+		Table:   table,
+		Columns: []string{fpk, rpk},
+		Wheres:  []grammar.WhereClause{{Kind: grammar.WhereIn, Column: fpk, Values: parentKeys}},
+	})
+
+	rows, err := b.sess.run.QueryContext(ctx, sqlStr, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var pairs []pivotPair
+	for rows.Next() {
+		var f, r any
+		if err := rows.Scan(&f, &r); err != nil {
+			return nil, err
+		}
+		pairs = append(pairs, pivotPair{parent: f, related: r})
+	}
+	return pairs, rows.Err()
 }
 
 // queryRelated fetches related rows where whereCol IN keys, returning the result

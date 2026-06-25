@@ -170,7 +170,7 @@ func parseRelation(f reflect.StructField, index int) (RelationMeta, bool) {
 	opts := strings.Split(play, ",")
 	kind := RelationKind(strings.TrimSpace(opts[0]))
 	switch kind {
-	case HasMany, HasOne, BelongsTo:
+	case HasMany, HasOne, BelongsTo, BelongsToMany:
 	default:
 		return RelationMeta{}, false
 	}
@@ -191,6 +191,12 @@ func parseRelation(f reflect.StructField, index int) (RelationMeta, bool) {
 			rel.ForeignKey = kv[1]
 		case "localKey", "ownerKey":
 			rel.LocalKey = kv[1]
+		case "pivot":
+			rel.PivotTable = kv[1]
+		case "foreignPivotKey":
+			rel.ForeignPivotKey = kv[1]
+		case "relatedPivotKey":
+			rel.RelatedPivotKey = kv[1]
 		}
 	}
 	return rel, true
