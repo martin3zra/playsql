@@ -40,8 +40,9 @@ type RelationMeta struct {
 
 	// belongsToMany only:
 	PivotTable      string
-	ForeignPivotKey string // parent's key column in the pivot
-	RelatedPivotKey string // related's key column in the pivot
+	ForeignPivotKey string   // parent's key column in the pivot
+	RelatedPivotKey string   // related's key column in the pivot
+	PivotColumns    []string // extra pivot columns to load (withPivot=)
 }
 
 // ModelMeta is the immutable, parsed description of a model type.
@@ -58,6 +59,7 @@ type ModelMeta struct {
 	Guarded         []string
 	Columns         []ColumnMeta
 	Relations       map[string]RelationMeta // keyed by struct field name
+	PivotFieldIndex int                     // map[string]any field receiving pivot data; -1 if none
 
 	fieldByCol map[string]int // db column -> struct field index (scanner hot path)
 }

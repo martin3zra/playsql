@@ -144,8 +144,8 @@ func (b *Builder) loadBelongsToMany(ctx context.Context, parents []reflect.Value
 		return fmt.Errorf("playsql: relation %q: related key column %q not found", rel.Name, relatedKey)
 	}
 
-	// 1. pivot rows for these parents.
-	pairs, err := b.queryPivot(ctx, pivotTable, fpk, rpk, distinctKeys(parents, parentKeyIdx))
+	// 1. pivot rows for these parents (incl. any withPivot columns).
+	pairs, err := b.queryPivot(ctx, pivotTable, fpk, rpk, rel.PivotColumns, distinctKeys(parents, parentKeyIdx))
 	if err != nil {
 		return err
 	}
@@ -169,12 +169,23 @@ func (b *Builder) loadBelongsToMany(ctx context.Context, parents []reflect.Value
 		relIndex[r.Field(relatedKeyIdx).Interface()] = r
 	}
 
+	withPivot := len(rel.PivotColumns) > 0 && relatedMeta.PivotFieldIndex >= 0
+
 	// 3. group related by parent key via the pivot, then assign.
 	groups := map[any][]reflect.Value{}
 	for _, pr := range pairs {
-		if r, ok := relIndex[pr.related]; ok {
-			groups[pr.parent] = append(groups[pr.parent], r)
+		r, ok := relIndex[pr.related]
+		if !ok {
+			continue
 		}
+		if withPivot {
+			// Copy so each parent's instance carries its own pivot row.
+			cp := reflect.New(r.Type()).Elem()
+			cp.Set(r)
+			cp.Field(relatedMeta.PivotFieldIndex).Set(reflect.ValueOf(pr.data))
+			r = cp
+		}
+		groups[pr.parent] = append(groups[pr.parent], r)
 	}
 	for _, p := range parents {
 		matches := groups[p.Field(parentKeyIdx).Interface()]
@@ -184,14 +195,18 @@ func (b *Builder) loadBelongsToMany(ctx context.Context, parents []reflect.Value
 	return nil
 }
 
-type pivotPair struct{ parent, related any }
+type pivotPair struct {
+	parent, related any
+	data            map[string]any // withPivot column values
+}
 
-// queryPivot reads (foreignPivotKey, relatedPivotKey) pairs from the pivot table
-// for the given parent keys.
-func (b *Builder) queryPivot(ctx context.Context, table, fpk, rpk string, parentKeys []any) ([]pivotPair, error) {
+// queryPivot reads (foreignPivotKey, relatedPivotKey [, pivotColumns...]) rows
+// from the pivot table for the given parent keys.
+func (b *Builder) queryPivot(ctx context.Context, table, fpk, rpk string, pivotCols []string, parentKeys []any) ([]pivotPair, error) {
+	cols := append([]string{fpk, rpk}, pivotCols...)
 	sqlStr, args := b.sess.grammar.CompileSelect(grammar.CompiledQuery{
 		Table:   table,
-		Columns: []string{fpk, rpk},
+		Columns: cols,
 		Wheres:  []grammar.WhereClause{{Kind: grammar.WhereIn, Column: fpk, Values: parentKeys}},
 	})
 
@@ -203,13 +218,33 @@ func (b *Builder) queryPivot(ctx context.Context, table, fpk, rpk string, parent
 
 	var pairs []pivotPair
 	for rows.Next() {
-		var f, r any
-		if err := rows.Scan(&f, &r); err != nil {
+		cells := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range cells {
+			ptrs[i] = &cells[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
 			return nil, err
 		}
-		pairs = append(pairs, pivotPair{parent: f, related: r})
+
+		pair := pivotPair{parent: cells[0], related: cells[1]}
+		if len(pivotCols) > 0 {
+			pair.data = make(map[string]any, len(pivotCols))
+			for i, c := range pivotCols {
+				pair.data[c] = normalizePivot(cells[2+i])
+			}
+		}
+		pairs = append(pairs, pair)
 	}
 	return pairs, rows.Err()
+}
+
+// normalizePivot turns driver []byte values into strings for friendlier maps.
+func normalizePivot(v any) any {
+	if b, ok := v.([]byte); ok {
+		return string(b)
+	}
+	return v
 }
 
 // queryRelated fetches related rows where whereCol IN keys, applying an optional

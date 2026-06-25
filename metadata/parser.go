@@ -28,12 +28,13 @@ func parse(t reflect.Type) *ModelMeta {
 	}
 
 	m := &ModelMeta{
-		StructName:   t.Name(),
-		Table:        tableName(t),
-		PrimaryKey:   "id",
-		Incrementing: true,
-		Relations:    make(map[string]RelationMeta),
-		fieldByCol:   make(map[string]int),
+		StructName:      t.Name(),
+		Table:           tableName(t),
+		PrimaryKey:      "id",
+		Incrementing:    true,
+		Relations:       make(map[string]RelationMeta),
+		PivotFieldIndex: -1,
+		fieldByCol:      make(map[string]int),
 	}
 
 	var (
@@ -53,6 +54,7 @@ func parse(t reflect.Type) *ModelMeta {
 		col := columnName(f)
 		isPK := false
 		cast := ""
+		isPivotField := false
 		if play := f.Tag.Get("play"); play != "" {
 			for _, opt := range strings.Split(play, ",") {
 				opt = strings.TrimSpace(opt)
@@ -77,8 +79,17 @@ func parse(t reflect.Type) *ModelMeta {
 					m.Fillable = append(m.Fillable, col)
 				case "guarded":
 					m.Guarded = append(m.Guarded, col)
+				case "pivot":
+					isPivotField = true
 				}
 			}
+		}
+
+		// A map field tagged `play:"pivot"` receives belongsToMany pivot columns;
+		// it is neither a relation nor a regular column.
+		if isPivotField {
+			m.PivotFieldIndex = i
+			continue
 		}
 
 		// A struct/slice/pointer field is a relation UNLESS it has a cast, which
@@ -206,6 +217,8 @@ func parseRelation(f reflect.StructField, index int) (RelationMeta, bool) {
 			rel.ForeignPivotKey = kv[1]
 		case "relatedPivotKey":
 			rel.RelatedPivotKey = kv[1]
+		case "withPivot":
+			rel.PivotColumns = strings.Split(kv[1], "|")
 		}
 	}
 	return rel, true
