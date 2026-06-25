@@ -125,6 +125,70 @@ func (b *Builder) loadRelation(ctx context.Context, parents []reflect.Value, par
 
 	case metadata.BelongsToMany:
 		return b.loadBelongsToMany(ctx, parents, parentMeta, rel, relatedMeta, constraint)
+
+	case metadata.HasManyThrough, metadata.HasOneThrough:
+		return b.loadThrough(ctx, parents, parentMeta, rel, relatedMeta, constraint)
+	}
+
+	return nil
+}
+
+// loadThrough resolves a has*Through relation in two batched queries (no JOIN):
+// parent local keys -> through rows -> far rows, mapping each far row back to a
+// parent via the through table.
+func (b *Builder) loadThrough(ctx context.Context, parents []reflect.Value, parentMeta *metadata.ModelMeta, rel metadata.RelationMeta, farMeta *metadata.ModelMeta, constraint func(*Builder)) error {
+	if rel.ThroughTable == "" {
+		return fmt.Errorf("playsql: relation %q: %s requires a through= table", rel.Name, rel.Kind)
+	}
+	throughTable, firstKey, secondKey, throughKey, localKey := metadata.ResolveThrough(parentMeta, rel)
+
+	parentLocalIdx, ok := parentMeta.FieldIndexByColumn(localKey)
+	if !ok {
+		return fmt.Errorf("playsql: relation %q: local key column %q not found", rel.Name, localKey)
+	}
+	farSecondIdx, ok := farMeta.FieldIndexByColumn(secondKey)
+	if !ok {
+		return fmt.Errorf("playsql: relation %q: far key column %q not found on %s", rel.Name, secondKey, farMeta.StructName)
+	}
+
+	// Step 1: through rows (firstKey, throughKey) for the parents' local keys.
+	pairs, err := b.queryPivot(ctx, throughTable, firstKey, throughKey, nil, distinctKeys(parents, parentLocalIdx))
+	if err != nil {
+		return err
+	}
+
+	throughMap := map[any]any{} // through PK value -> parent local key value
+	throughKeys := make([]any, 0, len(pairs))
+	seen := map[any]bool{}
+	for _, pr := range pairs {
+		throughMap[pr.related] = pr.parent
+		if !seen[pr.related] {
+			seen[pr.related] = true
+			throughKeys = append(throughKeys, pr.related)
+		}
+	}
+
+	// Step 2: far rows whose second key matches a through PK.
+	far, err := b.queryRelated(ctx, rel.RelatedType, secondKey, throughKeys, constraint)
+	if err != nil {
+		return err
+	}
+
+	groups := map[any][]reflect.Value{}
+	for j := 0; j < far.Len(); j++ {
+		f := far.Index(j)
+		if pkey, ok := throughMap[f.Field(farSecondIdx).Interface()]; ok {
+			groups[pkey] = append(groups[pkey], f)
+		}
+	}
+
+	kind := metadata.HasMany
+	if rel.Kind == metadata.HasOneThrough {
+		kind = metadata.HasOne
+	}
+	for _, p := range parents {
+		matches := groups[p.Field(parentLocalIdx).Interface()]
+		assignChildren(p.Field(rel.FieldIndex), matches, kind)
 	}
 
 	return nil

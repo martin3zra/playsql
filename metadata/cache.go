@@ -22,10 +22,12 @@ type ColumnMeta struct {
 type RelationKind string
 
 const (
-	HasMany       RelationKind = "hasMany"
-	HasOne        RelationKind = "hasOne"
-	BelongsTo     RelationKind = "belongsTo"
-	BelongsToMany RelationKind = "belongsToMany"
+	HasMany        RelationKind = "hasMany"
+	HasOne         RelationKind = "hasOne"
+	BelongsTo      RelationKind = "belongsTo"
+	BelongsToMany  RelationKind = "belongsToMany"
+	HasManyThrough RelationKind = "hasManyThrough"
+	HasOneThrough  RelationKind = "hasOneThrough"
 )
 
 // RelationMeta describes one relationship field on a model. Keys may be empty
@@ -43,6 +45,12 @@ type RelationMeta struct {
 	ForeignPivotKey string   // parent's key column in the pivot
 	RelatedPivotKey string   // related's key column in the pivot
 	PivotColumns    []string // extra pivot columns to load (withPivot=)
+
+	// has*Through only:
+	ThroughTable string // intermediate table name (required)
+	FirstKey     string // parent's foreign key on the through table
+	SecondKey    string // through's foreign key on the far (related) table
+	ThroughKey   string // through table's primary key
 }
 
 // ModelMeta is the immutable, parsed description of a model type.
@@ -116,6 +124,34 @@ func ResolvePivot(parent *ModelMeta, rel RelationMeta, related *ModelMeta) (pivo
 	}
 	parentKey = parent.PrimaryKey
 	relatedKey = related.PrimaryKey
+	return
+}
+
+// ResolveThrough fills in has*Through conventions. ThroughTable is required;
+// the keys default to Eloquent conventions. Returns:
+//   - throughTable: the intermediate table
+//   - firstKey:   parent's FK on the through table   (default snake(parent)_id)
+//   - secondKey:  through's FK on the far table       (default singular(through)_id)
+//   - throughKey: through table PK                     (default "id")
+//   - localKey:   parent's local key                   (default parent PK)
+func ResolveThrough(parent *ModelMeta, rel RelationMeta) (throughTable, firstKey, secondKey, throughKey, localKey string) {
+	throughTable = rel.ThroughTable
+	firstKey = rel.FirstKey
+	if firstKey == "" {
+		firstKey = snake(parent.StructName) + "_id"
+	}
+	secondKey = rel.SecondKey
+	if secondKey == "" {
+		secondKey = singular(throughTable) + "_id"
+	}
+	throughKey = rel.ThroughKey
+	if throughKey == "" {
+		throughKey = "id"
+	}
+	localKey = rel.LocalKey
+	if localKey == "" {
+		localKey = parent.PrimaryKey
+	}
 	return
 }
 

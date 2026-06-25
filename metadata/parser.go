@@ -159,6 +159,21 @@ func hasSuffix(s, suffix string) bool {
 	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
 }
 
+// singular reverses the common English plural rules (loose inverse of pluralize).
+func singular(s string) string {
+	switch {
+	case hasSuffix(s, "ies"):
+		return s[:len(s)-3] + "y" // cities -> city
+	case hasSuffix(s, "ses"), hasSuffix(s, "xes"), hasSuffix(s, "zes"),
+		hasSuffix(s, "ches"), hasSuffix(s, "shes"):
+		return s[:len(s)-2] // buses -> bus
+	case hasSuffix(s, "s"):
+		return s[:len(s)-1] // users -> user
+	default:
+		return s
+	}
+}
+
 func isVowel(b byte) bool {
 	switch b {
 	case 'a', 'e', 'i', 'o', 'u':
@@ -190,7 +205,7 @@ func parseRelation(f reflect.StructField, index int) (RelationMeta, bool) {
 	opts := strings.Split(play, ",")
 	kind := RelationKind(strings.TrimSpace(opts[0]))
 	switch kind {
-	case HasMany, HasOne, BelongsTo, BelongsToMany:
+	case HasMany, HasOne, BelongsTo, BelongsToMany, HasManyThrough, HasOneThrough:
 	default:
 		return RelationMeta{}, false
 	}
@@ -219,6 +234,14 @@ func parseRelation(f reflect.StructField, index int) (RelationMeta, bool) {
 			rel.RelatedPivotKey = kv[1]
 		case "withPivot":
 			rel.PivotColumns = strings.Split(kv[1], "|")
+		case "through":
+			rel.ThroughTable = kv[1]
+		case "firstKey":
+			rel.FirstKey = kv[1]
+		case "secondKey":
+			rel.SecondKey = kv[1]
+		case "throughKey":
+			rel.ThroughKey = kv[1]
 		}
 	}
 	return rel, true
