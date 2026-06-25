@@ -66,6 +66,11 @@ func (c Config) DSN() (string, error) {
 			c.Username, c.Password, c.Host, c.Port, c.Database)
 		return dsn, nil
 
+	case SQLServer:
+		dsn := fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s",
+			c.Username, c.Password, c.Host, c.Port, c.Database)
+		return dsn, nil
+
 	default:
 		return "", fmt.Errorf("playsql: DSN not implemented for driver %q", c.Driver)
 	}

@@ -111,14 +111,17 @@ func For(driver string) Grammar {
 		return Postgres{}
 	case "mysql":
 		return MySQL{}
+	case "sqlserver", "mssql":
+		return MSSQL{}
 	default:
 		return nil
 	}
 }
 
-// compileSelect is the dialect-neutral SELECT assembler. Dialects differ only by
-// Wrap (quoting) and Placeholder (bind style), so both are taken from g.
-func compileSelect(g Grammar, q CompiledQuery) (string, []any) {
+// selectCore builds everything up to (and including) ORDER BY, leaving the
+// dialect-specific row-limiting clause to the caller. hasOrder reports whether
+// an ORDER BY was emitted.
+func selectCore(g Grammar, q CompiledQuery) (sql string, args []any, hasOrder bool) {
 	cols := "*"
 	switch {
 	case q.Aggregate != "":
@@ -137,7 +140,6 @@ func compileSelect(g Grammar, q CompiledQuery) (string, []any) {
 	sb.WriteString(" FROM ")
 	sb.WriteString(g.Wrap(q.Table))
 
-	var args []any
 	if len(q.Wheres) > 0 {
 		n := 0
 		clause, wargs := compileWheres(g, q.Wheres, &n)
@@ -156,16 +158,39 @@ func compileSelect(g Grammar, q CompiledQuery) (string, []any) {
 			sb.WriteByte(' ')
 			sb.WriteString(o.Direction)
 		}
+		hasOrder = true
 	}
 
+	return sb.String(), args, hasOrder
+}
+
+// compileSelect is the LIMIT/OFFSET assembler shared by SQLite/Postgres/MySQL.
+func compileSelect(g Grammar, q CompiledQuery) (string, []any) {
+	sql, args, _ := selectCore(g, q)
 	if q.Limit > 0 {
-		fmt.Fprintf(&sb, " LIMIT %d", q.Limit)
+		sql += fmt.Sprintf(" LIMIT %d", q.Limit)
 	}
 	if q.Offset > 0 {
-		fmt.Fprintf(&sb, " OFFSET %d", q.Offset)
+		sql += fmt.Sprintf(" OFFSET %d", q.Offset)
 	}
+	return sql, args
+}
 
-	return sb.String(), args
+// compileSelectOffsetFetch is the SQL Server form: OFFSET n ROWS FETCH NEXT m
+// ROWS ONLY, which requires an ORDER BY (a stable fallback is added when none).
+func compileSelectOffsetFetch(g Grammar, q CompiledQuery) (string, []any) {
+	sql, args, hasOrder := selectCore(g, q)
+	if q.Limit <= 0 && q.Offset <= 0 {
+		return sql, args
+	}
+	if !hasOrder {
+		sql += " ORDER BY (SELECT NULL)"
+	}
+	sql += fmt.Sprintf(" OFFSET %d ROWS", q.Offset)
+	if q.Limit > 0 {
+		sql += fmt.Sprintf(" FETCH NEXT %d ROWS ONLY", q.Limit)
+	}
+	return sql, args
 }
 
 // compileDelete builds a DELETE with parameterized WHERE predicates.
