@@ -51,9 +51,35 @@ type Tx struct {
 	*session
 }
 
-// Open connects using a registered database/sql driver and selects the grammar
-// for that driver. It returns an error rather than calling log.Fatal.
-func Open(driver, dsn string) (*DB, error) {
+// Open connects using the given Config, applying pool settings and selecting
+// the grammar for the driver. It returns an error rather than calling log.Fatal.
+func Open(cfg Config) (*DB, error) {
+	dsn, err := cfg.DSN()
+	if err != nil {
+		return nil, err
+	}
+
+	db, err := OpenDSN(string(cfg.Driver), dsn)
+	if err != nil {
+		return nil, err
+	}
+
+	if cfg.MaxOpenConns > 0 {
+		db.sql.SetMaxOpenConns(cfg.MaxOpenConns)
+	}
+	if cfg.MaxIdleConns > 0 {
+		db.sql.SetMaxIdleConns(cfg.MaxIdleConns)
+	}
+	if cfg.ConnMaxLifetime > 0 {
+		db.sql.SetConnMaxLifetime(cfg.ConnMaxLifetime)
+	}
+
+	return db, nil
+}
+
+// OpenDSN is the low-level constructor: a registered database/sql driver name
+// and a ready-made DSN. Open builds on it. Useful for tests and custom DSNs.
+func OpenDSN(driver, dsn string) (*DB, error) {
 	g := grammar.For(driver)
 	if g == nil {
 		return nil, fmt.Errorf("playsql: unsupported driver %q", driver)

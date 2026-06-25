@@ -33,9 +33,48 @@ func For(driver string) Grammar {
 	switch driver {
 	case "sqlite", "sqlite3":
 		return SQLite{}
+	case "postgres", "pgx":
+		return Postgres{}
 	default:
 		return nil
 	}
+}
+
+// compileSelect is the dialect-neutral SELECT assembler. Dialects differ only by
+// Wrap (quoting) and Placeholder (bind style), so both are taken from g.
+func compileSelect(g Grammar, q CompiledQuery) (string, []any) {
+	cols := "*"
+	if len(q.Columns) > 0 {
+		wrapped := make([]string, len(q.Columns))
+		for i, c := range q.Columns {
+			wrapped[i] = g.Wrap(c)
+		}
+		cols = strings.Join(wrapped, ", ")
+	}
+
+	var sb strings.Builder
+	sb.WriteString("SELECT ")
+	sb.WriteString(cols)
+	sb.WriteString(" FROM ")
+	sb.WriteString(g.Wrap(q.Table))
+
+	var args []any
+	if len(q.Wheres) > 0 {
+		sb.WriteString(" WHERE ")
+		for i, w := range q.Wheres {
+			if i > 0 {
+				sb.WriteString(" AND ")
+			}
+			sb.WriteString(g.Wrap(w.Column))
+			sb.WriteByte(' ')
+			sb.WriteString(w.Op)
+			sb.WriteByte(' ')
+			sb.WriteString(g.Placeholder(i + 1))
+			args = append(args, w.Value)
+		}
+	}
+
+	return sb.String(), args
 }
 
 // wrapQualified wraps a possibly dotted identifier (table.column) part by part,

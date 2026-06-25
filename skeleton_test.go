@@ -21,7 +21,7 @@ func (User) TableName() string { return "users" }
 
 func setup(t *testing.T) *playsql.DB {
 	t.Helper()
-	db, err := playsql.Open("sqlite", ":memory:")
+	db, err := playsql.Open(playsql.Config{Driver: playsql.SQLite, Database: ":memory:"})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

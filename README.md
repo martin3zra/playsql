@@ -10,7 +10,7 @@ An Eloquent-style ORM for Go — concurrency-safe, no global state, metadata-dri
 ## Example
 
 ```go
-db, err := playsql.Open("sqlite", ":memory:")
+db, err := playsql.Open(playsql.Config{Driver: playsql.SQLite, Database: ":memory:"})
 if err != nil {
 	log.Fatal(err)
 }
