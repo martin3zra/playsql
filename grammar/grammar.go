@@ -109,6 +109,8 @@ func For(driver string) Grammar {
 		return SQLite{}
 	case "postgres", "pgx":
 		return Postgres{}
+	case "mysql":
+		return MySQL{}
 	default:
 		return nil
 	}
@@ -180,14 +182,14 @@ func compileDelete(g Grammar, s DeleteStmt) string {
 	return sb.String()
 }
 
-// compileInsert builds a single-row INSERT. returning controls whether a
-// RETURNING clause is appended (Postgres) to yield the generated id.
-func compileInsert(g Grammar, s InsertStmt, returning bool) (string, bool) {
+// insertInto builds "INSERT INTO <table> (<cols>) VALUES (...)[, (...)]" with
+// placeholders numbered across all rows.
+func insertInto(g Grammar, table string, cols []string, rows int) string {
 	var sb strings.Builder
 	sb.WriteString("INSERT INTO ")
-	sb.WriteString(g.Wrap(s.Table))
+	sb.WriteString(g.Wrap(table))
 	sb.WriteString(" (")
-	for i, c := range s.Columns {
+	for i, c := range cols {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
@@ -195,7 +197,6 @@ func compileInsert(g Grammar, s InsertStmt, returning bool) (string, bool) {
 	}
 	sb.WriteString(") VALUES ")
 
-	rows := s.Rows
 	if rows < 1 {
 		rows = 1
 	}
@@ -205,7 +206,7 @@ func compileInsert(g Grammar, s InsertStmt, returning bool) (string, bool) {
 			sb.WriteString(", ")
 		}
 		sb.WriteByte('(')
-		for c := range s.Columns {
+		for c := range cols {
 			if c > 0 {
 				sb.WriteString(", ")
 			}
@@ -214,51 +215,24 @@ func compileInsert(g Grammar, s InsertStmt, returning bool) (string, bool) {
 		}
 		sb.WriteByte(')')
 	}
+	return sb.String()
+}
 
-	// RETURNING only makes sense for a single-row insert of an incrementing key.
-	returnsID := false
-	if returning && rows == 1 && s.Incrementing && s.PrimaryKey != "" {
-		sb.WriteString(" RETURNING ")
-		sb.WriteString(g.Wrap(s.PrimaryKey))
-		returnsID = true
+// compileInsert builds an INSERT. returning appends RETURNING (Postgres) to
+// yield the generated id; only for a single-row incrementing-key insert.
+func compileInsert(g Grammar, s InsertStmt, returning bool) (string, bool) {
+	sql := insertInto(g, s.Table, s.Columns, s.Rows)
+	if returning && s.Rows <= 1 && s.Incrementing && s.PrimaryKey != "" {
+		return sql + " RETURNING " + g.Wrap(s.PrimaryKey), true
 	}
-	return sb.String(), returnsID
+	return sql, false
 }
 
 // compileUpsert builds INSERT ... ON CONFLICT (cols) DO UPDATE SET c = EXCLUDED.c
 // (the Postgres/SQLite form). Empty UpdateColumns yields DO NOTHING.
 func compileUpsert(g Grammar, s UpsertStmt) string {
 	var sb strings.Builder
-	sb.WriteString("INSERT INTO ")
-	sb.WriteString(g.Wrap(s.Table))
-	sb.WriteString(" (")
-	for i, c := range s.Columns {
-		if i > 0 {
-			sb.WriteString(", ")
-		}
-		sb.WriteString(g.Wrap(c))
-	}
-	sb.WriteString(") VALUES ")
-
-	rows := s.Rows
-	if rows < 1 {
-		rows = 1
-	}
-	n := 0
-	for r := 0; r < rows; r++ {
-		if r > 0 {
-			sb.WriteString(", ")
-		}
-		sb.WriteByte('(')
-		for c := range s.Columns {
-			if c > 0 {
-				sb.WriteString(", ")
-			}
-			n++
-			sb.WriteString(g.Placeholder(n))
-		}
-		sb.WriteByte(')')
-	}
+	sb.WriteString(insertInto(g, s.Table, s.Columns, s.Rows))
 
 	sb.WriteString(" ON CONFLICT (")
 	for i, c := range s.ConflictColumns {
@@ -283,6 +257,32 @@ func compileUpsert(g Grammar, s UpsertStmt) string {
 		sb.WriteString(w)
 		sb.WriteString(" = EXCLUDED.")
 		sb.WriteString(w)
+	}
+	return sb.String()
+}
+
+// compileUpsertMySQL builds INSERT ... ON DUPLICATE KEY UPDATE c = VALUES(c).
+// MySQL keys off the table's unique indexes, so ConflictColumns is ignored.
+// With no UpdateColumns it self-assigns the first column (an idempotent no-op,
+// MySQL has no DO NOTHING).
+func compileUpsertMySQL(g Grammar, s UpsertStmt) string {
+	var sb strings.Builder
+	sb.WriteString(insertInto(g, s.Table, s.Columns, s.Rows))
+	sb.WriteString(" ON DUPLICATE KEY UPDATE ")
+
+	cols := s.UpdateColumns
+	if len(cols) == 0 && len(s.Columns) > 0 {
+		cols = s.Columns[:1] // no-op self-assign
+	}
+	for i, c := range cols {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		w := g.Wrap(c)
+		sb.WriteString(w)
+		sb.WriteString(" = VALUES(")
+		sb.WriteString(w)
+		sb.WriteByte(')')
 	}
 	return sb.String()
 }
