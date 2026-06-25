@@ -15,6 +15,7 @@ type ColumnMeta struct {
 	DBName     string // database column name
 	FieldIndex int    // index into the struct's fields
 	PrimaryKey bool
+	Cast       string // e.g. "json"; empty for a plain scalar column
 }
 
 // RelationKind enumerates the supported relationship types.
@@ -142,6 +143,18 @@ func containsStr(s []string, v string) bool {
 func (m *ModelMeta) FieldIndexByColumn(col string) (int, bool) {
 	i, ok := m.fieldByCol[col]
 	return i, ok
+}
+
+// Column returns the metadata for a database column.
+func (m *ModelMeta) Column(col string) (ColumnMeta, bool) {
+	if i, ok := m.fieldByCol[col]; ok {
+		for _, c := range m.Columns {
+			if c.FieldIndex == i {
+				return c, true
+			}
+		}
+	}
+	return ColumnMeta{}, false
 }
 
 // ColumnNames returns the database column names in declaration order.

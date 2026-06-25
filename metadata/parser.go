@@ -50,19 +50,19 @@ func parse(t reflect.Type) *ModelMeta {
 			continue
 		}
 
-		// Relation fields become RelationMeta, never columns.
-		if isRelationField(f.Type) {
-			if rel, ok := parseRelation(f, i); ok {
-				m.Relations[f.Name] = rel
-			}
-			continue
-		}
-
 		col := columnName(f)
 		isPK := false
+		cast := ""
 		if play := f.Tag.Get("play"); play != "" {
 			for _, opt := range strings.Split(play, ",") {
-				switch strings.TrimSpace(opt) {
+				opt = strings.TrimSpace(opt)
+				if kv := strings.SplitN(opt, "=", 2); len(kv) == 2 {
+					if kv[0] == "cast" {
+						cast = kv[1]
+					}
+					continue
+				}
+				switch opt {
 				case "pk":
 					isPK = true
 					sawPK = true
@@ -81,6 +81,15 @@ func parse(t reflect.Type) *ModelMeta {
 			}
 		}
 
+		// A struct/slice/pointer field is a relation UNLESS it has a cast, which
+		// reclassifies it as a (JSON-encoded) column.
+		if cast == "" && isRelationField(f.Type) {
+			if rel, ok := parseRelation(f, i); ok {
+				m.Relations[f.Name] = rel
+			}
+			continue
+		}
+
 		switch col {
 		case createdAtColumn:
 			m.CreatedAtColumn = col
@@ -88,7 +97,7 @@ func parse(t reflect.Type) *ModelMeta {
 			m.UpdatedAtColumn = col
 		}
 
-		m.Columns = append(m.Columns, ColumnMeta{DBName: col, FieldIndex: i, PrimaryKey: isPK})
+		m.Columns = append(m.Columns, ColumnMeta{DBName: col, FieldIndex: i, PrimaryKey: isPK, Cast: cast})
 		m.fieldByCol[col] = i
 	}
 

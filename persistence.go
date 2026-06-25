@@ -2,6 +2,7 @@ package playsql
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"time"
@@ -41,6 +42,10 @@ func (s *session) Insert(ctx context.Context, model any) error {
 		if c.DBName == meta.CreatedAtColumn || c.DBName == meta.UpdatedAtColumn {
 			val = now
 			setTimeField(elem, c.FieldIndex, now)
+		} else if c.Cast != "" {
+			if val, err = castWrite(c.Cast, val); err != nil {
+				return err
+			}
 		}
 		columns = append(columns, c.DBName)
 		values = append(values, val)
@@ -126,8 +131,14 @@ func (s *session) Update(ctx context.Context, model any) error {
 		if original != nil && reflect.DeepEqual(cur, original[c.DBName]) {
 			continue // unchanged — skip when we have a baseline
 		}
+		writeVal := cur
+		if c.Cast != "" {
+			if writeVal, err = castWrite(c.Cast, cur); err != nil {
+				return err
+			}
+		}
 		columns = append(columns, c.DBName)
-		values = append(values, cur)
+		values = append(values, writeVal)
 	}
 
 	// Nothing changed and we have a baseline -> no DB write, but the save
@@ -321,6 +332,21 @@ func structValue(model any) (*metadata.ModelMeta, reflect.Value, error) {
 		return nil, reflect.Value{}, fmt.Errorf("playsql: model must be a pointer to a struct, got %T", model)
 	}
 	return metadata.For(model), rv.Elem(), nil
+}
+
+// castWrite encodes a field value for storage according to its cast. Currently
+// only "json" is supported (marshals to bytes).
+func castWrite(cast string, v any) (any, error) {
+	switch cast {
+	case "json":
+		b, err := json.Marshal(v)
+		if err != nil {
+			return nil, fmt.Errorf("playsql: json cast: %w", err)
+		}
+		return b, nil
+	default:
+		return v, nil
+	}
 }
 
 // setPK writes a generated integer id back onto an integer key field.

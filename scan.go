@@ -2,6 +2,7 @@ package playsql
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"reflect"
 
@@ -97,18 +98,31 @@ func scanInto(structVal reflect.Value, cols []string, meta *metadata.ModelMeta) 
 		holder reflect.Value // the *T inside the **T target
 		field  reflect.Value
 	}
+	type jsonBinding struct {
+		raw   reflect.Value // *[]byte target
+		field reflect.Value
+	}
 
 	targets = make([]any, len(cols))
 	var binds []binding
+	var jsonBinds []jsonBinding
 
 	for i, col := range cols {
-		idx, ok := meta.FieldIndexByColumn(col)
+		cm, ok := meta.Column(col)
 		if !ok {
 			var discard any
 			targets[i] = &discard
 			continue
 		}
-		field := structVal.Field(idx)
+		field := structVal.Field(cm.FieldIndex)
+
+		if cm.Cast == "json" {
+			raw := reflect.New(reflect.TypeOf([]byte(nil))) // *[]byte
+			targets[i] = raw.Interface()
+			jsonBinds = append(jsonBinds, jsonBinding{raw: raw, field: field})
+			continue
+		}
+
 		holderPtr := reflect.New(reflect.PtrTo(field.Type())) // **T, *T is nil
 		targets[i] = holderPtr.Interface()
 		binds = append(binds, binding{holder: holderPtr.Elem(), field: field})
@@ -118,6 +132,12 @@ func scanInto(structVal reflect.Value, cols []string, meta *metadata.ModelMeta) 
 		for _, b := range binds {
 			if !b.holder.IsNil() {
 				b.field.Set(b.holder.Elem())
+			}
+		}
+		for _, jb := range jsonBinds {
+			raw := jb.raw.Elem().Interface().([]byte)
+			if len(raw) > 0 {
+				_ = json.Unmarshal(raw, jb.field.Addr().Interface())
 			}
 		}
 	}
