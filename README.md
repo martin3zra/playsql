@@ -101,7 +101,16 @@ Predicates (all bound, never interpolated):
 ```
 
 Shaping + terminals: `Select`, `OrderBy`, `Limit`/`Offset` (`Take`/`Skip`),
-`Get`, `First`, `Find(id)`, `Count`.
+`Get`, `First`, `Find(id)`, `Count`, `Paginate`.
+
+```go
+// typed: TypedPage[User]{ Items, Total, Page, PerPage, LastPage }
+res, err := playsql.Query[User](db).OrderBy("id", playsql.Asc).Paginate(ctx, page, 20)
+
+// untyped: fills dest, returns metadata
+var users []User
+p, err := db.Model(&User{}).Paginate(ctx, &users, page, 20)
+```
 
 ## Write
 

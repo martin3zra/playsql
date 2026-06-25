@@ -3,7 +3,8 @@
 // Package-level integration suite exercising the same operations against live
 // Postgres, MySQL, and SQL Server. Run with: make db-up && make test-int.
 // A driver whose DSN is unreachable is skipped. Override DSNs via env:
-//   PLAYSQL_POSTGRES_DSN, PLAYSQL_MYSQL_DSN, PLAYSQL_MSSQL_DSN
+//
+//	PLAYSQL_POSTGRES_DSN, PLAYSQL_MYSQL_DSN, PLAYSQL_MSSQL_DSN
 package playsql_test
 
 import (
