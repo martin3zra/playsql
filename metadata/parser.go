@@ -28,9 +28,11 @@ func parse(t reflect.Type) *ModelMeta {
 	}
 
 	m := &ModelMeta{
+		StructName:   t.Name(),
 		Table:        tableName(t),
 		PrimaryKey:   "id",
 		Incrementing: true,
+		Relations:    make(map[string]RelationMeta),
 		fieldByCol:   make(map[string]int),
 	}
 
@@ -48,8 +50,11 @@ func parse(t reflect.Type) *ModelMeta {
 			continue
 		}
 
-		// Skip relation fields for the skeleton (slices, pointers to struct).
+		// Relation fields become RelationMeta, never columns.
 		if isRelationField(f.Type) {
+			if rel, ok := parseRelation(f, i); ok {
+				m.Relations[f.Name] = rel
+			}
 			continue
 		}
 
@@ -152,6 +157,55 @@ func columnName(f reflect.StructField) string {
 		}
 	}
 	return snake(f.Name)
+}
+
+// parseRelation builds a RelationMeta from a relation field's `play` tag. The
+// first option is the kind; foreignKey=/localKey=/ownerKey= override conventions.
+// Returns ok=false when the tag isn't a recognized relationship.
+func parseRelation(f reflect.StructField, index int) (RelationMeta, bool) {
+	play := f.Tag.Get("play")
+	if play == "" {
+		return RelationMeta{}, false
+	}
+	opts := strings.Split(play, ",")
+	kind := RelationKind(strings.TrimSpace(opts[0]))
+	switch kind {
+	case HasMany, HasOne, BelongsTo:
+	default:
+		return RelationMeta{}, false
+	}
+
+	rel := RelationMeta{
+		Name:        f.Name,
+		Kind:        kind,
+		FieldIndex:  index,
+		RelatedType: relatedType(f.Type),
+	}
+	for _, opt := range opts[1:] {
+		kv := strings.SplitN(strings.TrimSpace(opt), "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		switch kv[0] {
+		case "foreignKey", "fk":
+			rel.ForeignKey = kv[1]
+		case "localKey", "ownerKey":
+			rel.LocalKey = kv[1]
+		}
+	}
+	return rel, true
+}
+
+// relatedType unwraps a relation field type to the related struct type:
+// []Post, []*Post, *Post, Post all -> Post.
+func relatedType(t reflect.Type) reflect.Type {
+	if t.Kind() == reflect.Slice {
+		t = t.Elem()
+	}
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	return t
 }
 
 func isRelationField(t reflect.Type) bool {

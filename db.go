@@ -10,6 +10,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/martin3zra/playsql/grammar"
 )
@@ -89,11 +90,22 @@ func OpenDSN(driver, dsn string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("playsql: open: %w", err)
 	}
+
+	// An in-memory SQLite database is private to each connection, so a pool of
+	// them would see different (empty) databases. Pin to a single connection.
+	if isSQLite(driver) && strings.Contains(dsn, ":memory:") {
+		conn.SetMaxOpenConns(1)
+	}
+
 	if err := conn.PingContext(context.Background()); err != nil {
 		return nil, fmt.Errorf("playsql: ping: %w", err)
 	}
 
 	return &DB{sql: conn, session: &session{run: conn, grammar: g}}, nil
+}
+
+func isSQLite(driver string) bool {
+	return driver == "sqlite" || driver == "sqlite3"
 }
 
 // Close releases the underlying connection pool.

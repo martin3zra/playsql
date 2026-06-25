@@ -17,8 +17,29 @@ type ColumnMeta struct {
 	PrimaryKey bool
 }
 
+// RelationKind enumerates the supported relationship types.
+type RelationKind string
+
+const (
+	HasMany   RelationKind = "hasMany"
+	HasOne    RelationKind = "hasOne"
+	BelongsTo RelationKind = "belongsTo"
+)
+
+// RelationMeta describes one relationship field on a model. Keys may be empty
+// (resolved by convention via ResolveRelationKeys at load time).
+type RelationMeta struct {
+	Name        string // struct field name (the With() key)
+	Kind        RelationKind
+	FieldIndex  int          // index of the relation field on the parent struct
+	RelatedType reflect.Type // the related struct type (slice/pointer unwrapped)
+	ForeignKey  string       // explicit override
+	LocalKey    string       // explicit override (local key / owner key)
+}
+
 // ModelMeta is the immutable, parsed description of a model type.
 type ModelMeta struct {
+	StructName      string // Go type name (for convention-based key naming)
 	Table           string
 	PrimaryKey      string
 	Incrementing    bool
@@ -29,8 +50,36 @@ type ModelMeta struct {
 	Fillable        []string
 	Guarded         []string
 	Columns         []ColumnMeta
+	Relations       map[string]RelationMeta // keyed by struct field name
 
 	fieldByCol map[string]int // db column -> struct field index (scanner hot path)
+}
+
+// ResolveRelationKeys returns the foreign key (on the "child" side) and the
+// other key (local key on the parent for has-*, owner key on the related for
+// belongsTo), filling in Eloquent conventions where the relation left them blank.
+func ResolveRelationKeys(parent *ModelMeta, rel RelationMeta, related *ModelMeta) (foreignKey, otherKey string) {
+	switch rel.Kind {
+	case HasMany, HasOne:
+		foreignKey = rel.ForeignKey
+		if foreignKey == "" {
+			foreignKey = snake(parent.StructName) + "_id"
+		}
+		otherKey = rel.LocalKey
+		if otherKey == "" {
+			otherKey = parent.PrimaryKey
+		}
+	case BelongsTo:
+		foreignKey = rel.ForeignKey
+		if foreignKey == "" {
+			foreignKey = snake(related.StructName) + "_id"
+		}
+		otherKey = rel.LocalKey
+		if otherKey == "" {
+			otherKey = related.PrimaryKey
+		}
+	}
+	return foreignKey, otherKey
 }
 
 // CanFill reports whether a column may be mass-assigned from a map. Fillable is

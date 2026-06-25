@@ -34,6 +34,7 @@ type Builder struct {
 	columns []string
 	wheres  []grammar.WhereClause
 	orders  []grammar.OrderClause
+	withs   []string
 	limit   int
 	offset  int
 	trashed trashedMode
@@ -147,6 +148,13 @@ func expandValues(values []any) []any {
 	return out
 }
 
+// With eager-loads the named relationships (struct field names) after the query
+// runs, batching each with a single WhereIn to avoid N+1.
+func (b *Builder) With(relations ...string) *Builder {
+	b.withs = append(b.withs, relations...)
+	return b
+}
+
 // WithTrashed includes soft-deleted rows in the query.
 func (b *Builder) WithTrashed() *Builder { b.trashed = trashedInclude; return b }
 
@@ -238,7 +246,10 @@ func (b *Builder) Get(ctx context.Context, dest any) error {
 	if err := scanRows(rows, dest, b.meta); err != nil {
 		return err
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	return b.loadRelations(ctx, dest)
 }
 
 // First scans the first matching row into dest (a *T). Returns ErrNotFound when
@@ -257,7 +268,10 @@ func (b *Builder) First(ctx context.Context, dest any) error {
 	}
 	defer rows.Close()
 
-	return scanOne(rows, dest, b.meta)
+	if err := scanOne(rows, dest, b.meta); err != nil {
+		return err
+	}
+	return b.loadRelations(ctx, dest)
 }
 
 // Find scans the row whose primary key equals id into dest (a *T). The id is
