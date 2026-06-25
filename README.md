@@ -1,5 +1,7 @@
 # playsql
 
+[![CI](https://github.com/martin3zra/playsql/actions/workflows/ci.yml/badge.svg)](https://github.com/martin3zra/playsql/actions/workflows/ci.yml)
+
 An Eloquent-style ORM for Go — concurrency-safe, no global state, metadata-driven.
 Four dialects (SQLite, PostgreSQL, MySQL, SQL Server), eager-loaded relationships
 with no N+1, and an optional generic query API.
@@ -221,4 +223,4 @@ See [DESIGN.md](DESIGN.md) for the full architecture.
 
 ## License
 
-TBD.
+MIT — see [LICENSE](LICENSE).
