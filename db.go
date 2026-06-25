@@ -78,15 +78,19 @@ func Open(cfg Config) (*DB, error) {
 	return db, nil
 }
 
-// OpenDSN is the low-level constructor: a registered database/sql driver name
-// and a ready-made DSN. Open builds on it. Useful for tests and custom DSNs.
+// OpenDSN is the low-level constructor: a driver name and a ready-made DSN. Open
+// builds on it. Useful for tests and custom DSNs.
 func OpenDSN(driver, dsn string) (*DB, error) {
 	g := grammar.For(driver)
 	if g == nil {
 		return nil, fmt.Errorf("playsql: unsupported driver %q", driver)
 	}
 
-	conn, err := sql.Open(driver, dsn)
+	// "mssql" and "sqlserver" select the same grammar, but the SQL Server driver
+	// forks register under different names (denisenkom: both; microsoft:
+	// "sqlserver" only). Resolve to whichever name is actually registered so the
+	// config spelling does not have to match the imported driver.
+	conn, err := sql.Open(resolveDriverName(driver), dsn)
 	if err != nil {
 		return nil, fmt.Errorf("playsql: open: %w", err)
 	}
@@ -106,6 +110,29 @@ func OpenDSN(driver, dsn string) (*DB, error) {
 
 func isSQLite(driver string) bool {
 	return driver == "sqlite" || driver == "sqlite3"
+}
+
+// resolveDriverName maps a requested driver name to one actually registered with
+// database/sql. For the SQL Server aliases it prefers the requested name, then
+// falls back to its sibling, so either "mssql" or "sqlserver" works regardless
+// of which driver fork the caller imported.
+func resolveDriverName(driver string) string {
+	if driver != "mssql" && driver != "sqlserver" {
+		return driver
+	}
+	registered := map[string]bool{}
+	for _, d := range sql.Drivers() {
+		registered[d] = true
+	}
+	if registered[driver] {
+		return driver
+	}
+	for _, alt := range []string{"sqlserver", "mssql"} {
+		if registered[alt] {
+			return alt
+		}
+	}
+	return driver // neither registered; let sql.Open report it
 }
 
 // Close releases the underlying connection pool.

@@ -15,12 +15,24 @@ const (
 	Postgres  Driver = "postgres"
 	MySQL     Driver = "mysql"
 	SQLServer Driver = "sqlserver"
+	MSSQL     Driver = "mssql" // alias for SQL Server (go-mssqldb registers both)
 )
 
 // Config describes a connection. It is injected by the caller — the package
-// reads no environment variables of its own.
+// reads no environment variables of its own. Provide either a ready-made Source
+// (full DSN) or the individual fields for playsql to assemble one.
 type Config struct {
-	Driver   Driver
+	Driver Driver
+
+	// Source is a complete driver DSN. When set, it is used verbatim and the
+	// Host/Port/Database/Username/Password fields are ignored. This matches the
+	// usual "driver + source" config form, e.g.:
+	//   sqlite:     "acme.sqlite"
+	//   postgres:   "postgres://user:pass@host:5432/db?sslmode=disable"
+	//   mysql:      "user:pass@tcp(host:3306)/db?parseTime=true"
+	//   sqlserver:  "sqlserver://user:pass@host:1433?database=db"
+	Source string
+
 	Host     string
 	Port     int
 	Database string // for SQLite, the file path or ":memory:"
@@ -36,8 +48,13 @@ type Config struct {
 	ConnMaxLifetime time.Duration
 }
 
-// DSN builds the data-source name for the configured driver.
+// DSN returns the data-source name: Source verbatim when set, otherwise one
+// assembled from the individual fields for the configured driver.
 func (c Config) DSN() (string, error) {
+	if c.Source != "" {
+		return c.Source, nil
+	}
+
 	switch c.Driver {
 	case SQLite:
 		if c.Database == "" {
