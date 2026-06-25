@@ -43,6 +43,9 @@ func scanRows(rows *sql.Rows, dest any, meta *metadata.ModelMeta) error {
 			return err
 		}
 
+		// Record exists+baseline before appending (the value path copies).
+		markPersisted(elemPtr.Interface(), meta, structVal)
+
 		if elemIsPtr {
 			slice.Set(reflect.Append(slice, elemPtr))
 		} else {
@@ -76,6 +79,7 @@ func scanOne(rows *sql.Rows, dest any, meta *metadata.ModelMeta) error {
 	if err := rows.Scan(scanTargets(dv.Elem(), cols, meta)...); err != nil {
 		return err
 	}
+	markPersisted(dest, meta, dv.Elem())
 	return rows.Err()
 }
 

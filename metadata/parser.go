@@ -8,6 +8,11 @@ import (
 
 var timeType = reflect.TypeOf(time.Time{})
 
+const (
+	createdAtColumn = "created_at"
+	updatedAtColumn = "updated_at"
+)
+
 // TableNamer lets a model declare its table name statically.
 type TableNamer interface {
 	TableName() string
@@ -67,6 +72,13 @@ func parse(t reflect.Type) *ModelMeta {
 			}
 		}
 
+		switch col {
+		case createdAtColumn:
+			m.CreatedAtColumn = col
+		case updatedAtColumn:
+			m.UpdatedAtColumn = col
+		}
+
 		m.Columns = append(m.Columns, ColumnMeta{DBName: col, FieldIndex: i, PrimaryKey: isPK})
 		m.fieldByCol[col] = i
 	}
@@ -93,7 +105,37 @@ func tableName(t reflect.Type) string {
 	if tn, ok := reflect.New(t).Interface().(TableNamer); ok {
 		return tn.TableName()
 	}
-	return snake(t.Name())
+	// Eloquent convention: snake_case the type name and pluralize.
+	return pluralize(snake(t.Name()))
+}
+
+// pluralize applies simple English pluralization rules. For irregular nouns,
+// define TableName() explicitly.
+func pluralize(s string) string {
+	if s == "" {
+		return s
+	}
+	switch {
+	case hasSuffix(s, "s"), hasSuffix(s, "x"), hasSuffix(s, "z"),
+		hasSuffix(s, "ch"), hasSuffix(s, "sh"):
+		return s + "es"
+	case hasSuffix(s, "y") && !isVowel(s[len(s)-2]):
+		return s[:len(s)-1] + "ies" // city -> cities
+	default:
+		return s + "s"
+	}
+}
+
+func hasSuffix(s, suffix string) bool {
+	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
+}
+
+func isVowel(b byte) bool {
+	switch b {
+	case 'a', 'e', 'i', 'o', 'u':
+		return true
+	}
+	return false
 }
 
 func columnName(f reflect.StructField) string {

@@ -24,6 +24,8 @@ type ModelMeta struct {
 	Incrementing    bool
 	SoftDeletes     bool
 	DeletedAtColumn string // set when SoftDeletes is true
+	CreatedAtColumn string // set when a created_at column is present
+	UpdatedAtColumn string // set when an updated_at column is present
 	Columns         []ColumnMeta
 
 	fieldByCol map[string]int // db column -> struct field index (scanner hot path)

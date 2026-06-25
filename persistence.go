@@ -12,7 +12,8 @@ import (
 
 // Insert writes model as a new row. model must be a pointer to a struct. For an
 // incrementing primary key, the zero key field is omitted and the generated id
-// is written back onto the struct.
+// is written back onto the struct. created_at/updated_at columns are stamped
+// automatically when present.
 func (s *session) Insert(ctx context.Context, model any) error {
 	meta, elem, err := structValue(model)
 	if err != nil {
@@ -20,6 +21,7 @@ func (s *session) Insert(ctx context.Context, model any) error {
 	}
 
 	pkIdx, _ := meta.PrimaryKeyFieldIndex()
+	now := time.Now()
 
 	var columns []string
 	var values []any
@@ -28,8 +30,13 @@ func (s *session) Insert(ctx context.Context, model any) error {
 		if c.PrimaryKey && meta.Incrementing && elem.Field(c.FieldIndex).IsZero() {
 			continue
 		}
+		val := elem.Field(c.FieldIndex).Interface()
+		if c.DBName == meta.CreatedAtColumn || c.DBName == meta.UpdatedAtColumn {
+			val = now
+			setTimeField(elem, c.FieldIndex, now)
+		}
 		columns = append(columns, c.DBName)
-		values = append(values, elem.Field(c.FieldIndex).Interface())
+		values = append(values, val)
 	}
 
 	sqlStr, returnsID := s.grammar.CompileInsert(grammar.InsertStmt{
@@ -45,23 +52,26 @@ func (s *session) Insert(ctx context.Context, model any) error {
 			return err
 		}
 		setPK(elem, pkIdx, id)
-		return nil
-	}
-
-	res, err := s.run.ExecContext(ctx, sqlStr, values...)
-	if err != nil {
-		return err
-	}
-	if meta.Incrementing {
-		if id, err := res.LastInsertId(); err == nil {
-			setPK(elem, pkIdx, id)
+	} else {
+		res, err := s.run.ExecContext(ctx, sqlStr, values...)
+		if err != nil {
+			return err
+		}
+		if meta.Incrementing {
+			if id, err := res.LastInsertId(); err == nil {
+				setPK(elem, pkIdx, id)
+			}
 		}
 	}
+
+	markPersisted(model, meta, elem)
 	return nil
 }
 
-// Update writes the model's non-primary-key columns to the row matching its
-// primary key. The key field must be set.
+// Update writes the model's columns to the row matching its primary key. When
+// the model embeds playsql.Model and was loaded/persisted, only changed columns
+// are written (and the update is a no-op if nothing changed). updated_at is
+// stamped automatically when present. The key field must be set.
 func (s *session) Update(ctx context.Context, model any) error {
 	meta, elem, err := structValue(model)
 	if err != nil {
@@ -72,10 +82,14 @@ func (s *session) Update(ctx context.Context, model any) error {
 	if !ok {
 		return fmt.Errorf("playsql: model %q has no primary key", meta.Table)
 	}
-	pkVal := elem.Field(pkIdx).Interface()
 	if elem.Field(pkIdx).IsZero() {
 		return fmt.Errorf("playsql: Update requires a non-zero primary key")
 	}
+	pkVal := elem.Field(pkIdx).Interface()
+
+	// Determine which columns to write.
+	original := originalOf(model)
+	now := time.Now()
 
 	var columns []string
 	var values []any
@@ -83,9 +97,35 @@ func (s *session) Update(ctx context.Context, model any) error {
 		if c.FieldIndex == pkIdx {
 			continue
 		}
+		if c.DBName == meta.CreatedAtColumn {
+			continue // never overwrite created_at on update
+		}
+		if c.DBName == meta.UpdatedAtColumn {
+			continue // handled after the dirty check
+		}
+
+		cur := elem.Field(c.FieldIndex).Interface()
+		if original != nil && reflect.DeepEqual(cur, original[c.DBName]) {
+			continue // unchanged — skip when we have a baseline
+		}
 		columns = append(columns, c.DBName)
-		values = append(values, elem.Field(c.FieldIndex).Interface())
+		values = append(values, cur)
 	}
+
+	// Nothing changed and we have a baseline -> no-op.
+	if len(columns) == 0 && original != nil {
+		return nil
+	}
+
+	// Stamp updated_at when present (and there is something to write).
+	if meta.UpdatedAtColumn != "" {
+		if idx, ok := meta.FieldIndexByColumn(meta.UpdatedAtColumn); ok {
+			setTimeField(elem, idx, now)
+		}
+		columns = append(columns, meta.UpdatedAtColumn)
+		values = append(values, now)
+	}
+
 	values = append(values, pkVal) // bound after the SET values
 
 	sqlStr := s.grammar.CompileUpdate(grammar.UpdateStmt{
@@ -96,16 +136,28 @@ func (s *session) Update(ctx context.Context, model any) error {
 		},
 	})
 
-	_, err = s.run.ExecContext(ctx, sqlStr, values...)
-	return err
+	if _, err := s.run.ExecContext(ctx, sqlStr, values...); err != nil {
+		return err
+	}
+
+	markPersisted(model, meta, elem)
+	return nil
 }
 
-// Save inserts when the model has no identity yet, otherwise updates. For an
-// incrementing key, "no identity" means the key field is zero.
+// Save inserts when the model has no identity yet, otherwise updates. When the
+// model embeds playsql.Model, identity is its exists flag; otherwise an
+// incrementing key is "new" when its field is zero.
 func (s *session) Save(ctx context.Context, model any) error {
 	meta, elem, err := structValue(model)
 	if err != nil {
 		return err
+	}
+
+	if acc, ok := baseOf(model); ok {
+		if acc.playExists() {
+			return s.Update(ctx, model)
+		}
+		return s.Insert(ctx, model)
 	}
 
 	if meta.Incrementing {
@@ -240,4 +292,43 @@ func setPK(elem reflect.Value, pkIdx int, id int64) {
 	if f.CanSet() && f.Kind() >= reflect.Int && f.Kind() <= reflect.Int64 {
 		f.SetInt(id)
 	}
+}
+
+// setTimeField writes t onto a time.Time or *time.Time field.
+func setTimeField(elem reflect.Value, idx int, t time.Time) {
+	f := elem.Field(idx)
+	if !f.CanSet() {
+		return
+	}
+	switch {
+	case f.Type() == reflect.TypeOf(time.Time{}):
+		f.Set(reflect.ValueOf(t))
+	case f.Kind() == reflect.Ptr && f.Type().Elem() == reflect.TypeOf(time.Time{}):
+		tc := t
+		f.Set(reflect.ValueOf(&tc))
+	}
+}
+
+// snapshot captures the current column values for dirty tracking.
+func snapshot(meta *metadata.ModelMeta, elem reflect.Value) map[string]any {
+	m := make(map[string]any, len(meta.Columns))
+	for _, c := range meta.Columns {
+		m[c.DBName] = elem.Field(c.FieldIndex).Interface()
+	}
+	return m
+}
+
+// markPersisted records exists+baseline on models that embed playsql.Model.
+func markPersisted(model any, meta *metadata.ModelMeta, elem reflect.Value) {
+	if acc, ok := baseOf(model); ok {
+		acc.playMarkPersisted(snapshot(meta, elem))
+	}
+}
+
+// originalOf returns the dirty-tracking baseline, or nil when unavailable.
+func originalOf(model any) map[string]any {
+	if acc, ok := baseOf(model); ok {
+		return acc.playOriginal()
+	}
+	return nil
 }
