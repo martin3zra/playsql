@@ -2,7 +2,6 @@ package playsql
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"reflect"
 	"time"
@@ -334,19 +333,13 @@ func structValue(model any) (*metadata.ModelMeta, reflect.Value, error) {
 	return metadata.For(model), rv.Elem(), nil
 }
 
-// castWrite encodes a field value for storage according to its cast. Currently
-// only "json" is supported (marshals to bytes).
+// castWrite encodes a field value for storage using the registered Caster for
+// the cast name; an unknown cast passes the value through unchanged.
 func castWrite(cast string, v any) (any, error) {
-	switch cast {
-	case "json":
-		b, err := json.Marshal(v)
-		if err != nil {
-			return nil, fmt.Errorf("playsql: json cast: %w", err)
-		}
-		return b, nil
-	default:
-		return v, nil
+	if caster, ok := casterFor(cast); ok {
+		return caster.Encode(v)
 	}
+	return v, nil
 }
 
 // setPK writes a generated integer id back onto an integer key field.
