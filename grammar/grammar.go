@@ -60,11 +60,13 @@ type DeleteStmt struct {
 	Wheres []WhereClause
 }
 
-// InsertStmt describes a single-row INSERT. Values are supplied by the caller in
-// Columns order; the grammar only needs the column names and key info.
+// InsertStmt describes an INSERT. Values are supplied by the caller in Columns
+// order, repeated Rows times for bulk inserts. The grammar only needs the
+// column names, row count, and key info.
 type InsertStmt struct {
 	Table        string
 	Columns      []string
+	Rows         int // number of value tuples; 0 or 1 => single row
 	PrimaryKey   string
 	Incrementing bool
 }
@@ -180,17 +182,31 @@ func compileInsert(g Grammar, s InsertStmt, returning bool) (string, bool) {
 		}
 		sb.WriteString(g.Wrap(c))
 	}
-	sb.WriteString(") VALUES (")
-	for i := range s.Columns {
-		if i > 0 {
+	sb.WriteString(") VALUES ")
+
+	rows := s.Rows
+	if rows < 1 {
+		rows = 1
+	}
+	n := 0
+	for r := 0; r < rows; r++ {
+		if r > 0 {
 			sb.WriteString(", ")
 		}
-		sb.WriteString(g.Placeholder(i + 1))
+		sb.WriteByte('(')
+		for c := range s.Columns {
+			if c > 0 {
+				sb.WriteString(", ")
+			}
+			n++
+			sb.WriteString(g.Placeholder(n))
+		}
+		sb.WriteByte(')')
 	}
-	sb.WriteByte(')')
 
+	// RETURNING only makes sense for a single-row insert of an incrementing key.
 	returnsID := false
-	if returning && s.Incrementing && s.PrimaryKey != "" {
+	if returning && rows == 1 && s.Incrementing && s.PrimaryKey != "" {
 		sb.WriteString(" RETURNING ")
 		sb.WriteString(g.Wrap(s.PrimaryKey))
 		returnsID = true

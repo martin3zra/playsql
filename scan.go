@@ -39,9 +39,11 @@ func scanRows(rows *sql.Rows, dest any, meta *metadata.ModelMeta) error {
 		elemPtr := reflect.New(structType) // *T
 		structVal := elemPtr.Elem()
 
-		if err := rows.Scan(scanTargets(structVal, cols, meta)...); err != nil {
+		targets, finish := scanInto(structVal, cols, meta)
+		if err := rows.Scan(targets...); err != nil {
 			return err
 		}
+		finish()
 
 		// Record exists+baseline before appending (the value path copies).
 		markPersisted(elemPtr.Interface(), meta, structVal)
@@ -76,25 +78,48 @@ func scanOne(rows *sql.Rows, dest any, meta *metadata.ModelMeta) error {
 		return ErrNotFound
 	}
 
-	if err := rows.Scan(scanTargets(dv.Elem(), cols, meta)...); err != nil {
+	targets, finish := scanInto(dv.Elem(), cols, meta)
+	if err := rows.Scan(targets...); err != nil {
 		return err
 	}
+	finish()
 	markPersisted(dest, meta, dv.Elem())
 	return rows.Err()
 }
 
-// scanTargets builds the per-column scan destinations for one struct value:
-// the mapped field's address, or a throwaway for unmapped columns. Column->field
-// mapping comes from metadata; no tag reflection happens here.
-func scanTargets(structVal reflect.Value, cols []string, meta *metadata.ModelMeta) []any {
-	targets := make([]any, len(cols))
+// scanInto builds the per-column scan destinations for one struct value and a
+// finish func that copies them onto the struct. Each mapped column is scanned
+// into a fresh pointer-to-field-type (**T) so a SQL NULL is tolerated: it leaves
+// the holder nil and the field keeps its zero value, while non-NULL values use
+// database/sql's native typed conversion. Unmapped columns are discarded.
+func scanInto(structVal reflect.Value, cols []string, meta *metadata.ModelMeta) (targets []any, finish func()) {
+	type binding struct {
+		holder reflect.Value // the *T inside the **T target
+		field  reflect.Value
+	}
+
+	targets = make([]any, len(cols))
+	var binds []binding
+
 	for i, col := range cols {
-		if idx, ok := meta.FieldIndexByColumn(col); ok {
-			targets[i] = structVal.Field(idx).Addr().Interface()
-		} else {
+		idx, ok := meta.FieldIndexByColumn(col)
+		if !ok {
 			var discard any
 			targets[i] = &discard
+			continue
+		}
+		field := structVal.Field(idx)
+		holderPtr := reflect.New(reflect.PtrTo(field.Type())) // **T, *T is nil
+		targets[i] = holderPtr.Interface()
+		binds = append(binds, binding{holder: holderPtr.Elem(), field: field})
+	}
+
+	finish = func() {
+		for _, b := range binds {
+			if !b.holder.IsNil() {
+				b.field.Set(b.holder.Elem())
+			}
 		}
 	}
-	return targets
+	return targets, finish
 }

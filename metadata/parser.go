@@ -68,6 +68,10 @@ func parse(t reflect.Type) *ModelMeta {
 				case "softdelete":
 					m.SoftDeletes = true
 					m.DeletedAtColumn = col
+				case "fillable":
+					m.Fillable = append(m.Fillable, col)
+				case "guarded":
+					m.Guarded = append(m.Guarded, col)
 				}
 			}
 		}

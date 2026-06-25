@@ -26,9 +26,33 @@ type ModelMeta struct {
 	DeletedAtColumn string // set when SoftDeletes is true
 	CreatedAtColumn string // set when a created_at column is present
 	UpdatedAtColumn string // set when an updated_at column is present
+	Fillable        []string
+	Guarded         []string
 	Columns         []ColumnMeta
 
 	fieldByCol map[string]int // db column -> struct field index (scanner hot path)
+}
+
+// CanFill reports whether a column may be mass-assigned from a map. Fillable is
+// a whitelist; if empty, Guarded acts as a blacklist; if both are empty, all
+// columns are assignable.
+func (m *ModelMeta) CanFill(column string) bool {
+	if len(m.Fillable) > 0 {
+		return containsStr(m.Fillable, column)
+	}
+	if len(m.Guarded) > 0 {
+		return !containsStr(m.Guarded, column)
+	}
+	return true
+}
+
+func containsStr(s []string, v string) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }
 
 // FieldIndexByColumn returns the struct field index for a database column.
