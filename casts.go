@@ -64,5 +64,8 @@ func (jsonCaster) Encode(field any) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("playsql: json cast: %w", err)
 	}
-	return b, nil
+	// Return a string, not []byte: drivers send []byte as a binary blob, which a
+	// PostgreSQL json/jsonb column rejects. A string coerces cleanly across all
+	// dialects and is identical text.
+	return string(b), nil
 }

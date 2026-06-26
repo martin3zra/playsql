@@ -45,6 +45,18 @@ type itBook struct {
 
 func (itBook) TableName() string { return "it_books" }
 
+type itPrefs struct {
+	Theme string `json:"theme"`
+}
+
+type itProfile struct {
+	ID    int64   `db:"id" play:"pk,incrementing"`
+	Name  string  `db:"name"`
+	Prefs itPrefs `db:"prefs" play:"cast=json"`
+}
+
+func (itProfile) TableName() string { return "it_profiles" }
+
 func env(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -77,6 +89,8 @@ var ddl = map[string][]string{
 		`CREATE TABLE it_people (id BIGSERIAL PRIMARY KEY, name TEXT UNIQUE, age BIGINT)`,
 		`CREATE TABLE it_authors (id BIGSERIAL PRIMARY KEY, name TEXT)`,
 		`CREATE TABLE it_books (id BIGSERIAL PRIMARY KEY, author_id BIGINT, title TEXT)`,
+		`DROP TABLE IF EXISTS it_profiles`,
+		`CREATE TABLE it_profiles (id BIGSERIAL PRIMARY KEY, name TEXT, prefs JSONB)`,
 	},
 	"mysql": {
 		`DROP TABLE IF EXISTS it_books`,
@@ -85,6 +99,8 @@ var ddl = map[string][]string{
 		`CREATE TABLE it_people (id BIGINT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(191) UNIQUE, age BIGINT)`,
 		`CREATE TABLE it_authors (id BIGINT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(191))`,
 		`CREATE TABLE it_books (id BIGINT AUTO_INCREMENT PRIMARY KEY, author_id BIGINT, title VARCHAR(191))`,
+		`DROP TABLE IF EXISTS it_profiles`,
+		`CREATE TABLE it_profiles (id BIGINT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(191), prefs JSON)`,
 	},
 	"mssql": {
 		`DROP TABLE IF EXISTS it_books`,
@@ -93,6 +109,8 @@ var ddl = map[string][]string{
 		`CREATE TABLE it_people (id BIGINT IDENTITY(1,1) PRIMARY KEY, name NVARCHAR(191) UNIQUE, age BIGINT)`,
 		`CREATE TABLE it_authors (id BIGINT IDENTITY(1,1) PRIMARY KEY, name NVARCHAR(191))`,
 		`CREATE TABLE it_books (id BIGINT IDENTITY(1,1) PRIMARY KEY, author_id BIGINT, title NVARCHAR(191))`,
+		`DROP TABLE IF EXISTS it_profiles`,
+		`CREATE TABLE it_profiles (id BIGINT IDENTITY(1,1) PRIMARY KEY, name NVARCHAR(191), prefs NVARCHAR(MAX))`,
 	},
 }
 
@@ -210,5 +228,20 @@ func runSuite(t *testing.T, db *playsql.DB) {
 	}
 	if len(books) != 2 || books[0].Author == nil || books[0].Author.Name != "A" {
 		t.Fatalf("belongsTo eager load wrong: %+v", books)
+	}
+
+	// JSON cast round-trip + WhereJSON (dialect-specific extract syntax).
+	if err := db.Insert(ctx, &itProfile{Name: "x", Prefs: itPrefs{Theme: "dark"}}); err != nil {
+		t.Fatalf("insert profile: %v", err)
+	}
+	if err := db.Insert(ctx, &itProfile{Name: "y", Prefs: itPrefs{Theme: "light"}}); err != nil {
+		t.Fatalf("insert profile2: %v", err)
+	}
+	var dark []itProfile
+	if err := db.Model(&itProfile{}).WhereJSON("prefs", "theme", "=", "dark").Get(ctx, &dark); err != nil {
+		t.Fatalf("where json: %v", err)
+	}
+	if len(dark) != 1 || dark[0].Name != "x" || dark[0].Prefs.Theme != "dark" {
+		t.Fatalf("WhereJSON/json cast wrong: %+v", dark)
 	}
 }
