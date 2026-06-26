@@ -118,10 +118,20 @@ res, err := playsql.Query[User](db).CursorPaginate(ctx, playsql.Cursor{
     Column: "id", After: lastID, Limit: 20, // After nil starts at the beginning
 })
 // res.Items, res.HasMore, res.NextCursor (pass as the next After)
+
+// composite cursor — a non-unique sort key plus a unique tiebreaker
+res, err := playsql.Query[User](db).CursorPaginate(ctx, playsql.Cursor{
+    Keys:  []playsql.CursorKey{{Column: "created_at"}, {Column: "id"}},
+    After: lastCursor, // []any{lastCreatedAt, lastID}; NextCursor returns the same shape
+    Limit: 20,
+})
 ```
 
-Cursor pagination orders by `Column` and seeks past `After` — no `OFFSET`, so it
-stays fast for deep pages. Use a unique, monotonic column (e.g. the primary key).
+Cursor pagination orders by the key(s) and seeks past `After` — no `OFFSET`, so
+it stays fast for deep pages. A single `Column` must be unique and monotonic
+(e.g. the primary key); paging by a non-unique column alone **skips rows on
+ties**. Add a unique tiebreaker via composite `Keys` (e.g. `created_at` + `id`)
+to page non-unique columns safely.
 
 ## Write
 
