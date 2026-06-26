@@ -106,13 +106,22 @@ Shaping + terminals: `Select`, `OrderBy`, `Limit`/`Offset` (`Take`/`Skip`),
 `Get`, `First`, `Find(id)`, `Count`, `Paginate`.
 
 ```go
-// typed: TypedPage[User]{ Items, Total, Page, PerPage, LastPage }
+// offset pagination — typed: TypedPage[User]{ Items, Total, Page, PerPage, LastPage }
 res, err := playsql.Query[User](db).OrderBy("id", playsql.Asc).Paginate(ctx, page, 20)
 
-// untyped: fills dest, returns metadata
+// offset — untyped: fills dest, returns metadata
 var users []User
 p, err := db.Model(&User{}).Paginate(ctx, &users, page, 20)
+
+// cursor (keyset) pagination — seek-based, fast at any depth
+res, err := playsql.Query[User](db).CursorPaginate(ctx, playsql.Cursor{
+    Column: "id", After: lastID, Limit: 20, // After nil starts at the beginning
+})
+// res.Items, res.HasMore, res.NextCursor (pass as the next After)
 ```
+
+Cursor pagination orders by `Column` and seeks past `After` — no `OFFSET`, so it
+stays fast for deep pages. Use a unique, monotonic column (e.g. the primary key).
 
 ## Write
 

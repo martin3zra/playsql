@@ -3,6 +3,7 @@ package playsql
 import (
 	"context"
 	"fmt"
+	"reflect"
 )
 
 // Pagination holds the metadata for an offset-paginated result.
@@ -58,4 +59,73 @@ func (t *TypedBuilder[T]) Paginate(ctx context.Context, page, perPage int) (Type
 	var items []T
 	p, err := t.b.Paginate(ctx, &items, page, perPage)
 	return TypedPage[T]{Pagination: p, Items: items}, err
+}
+
+// Cursor describes a keyset (cursor) page: order by Column and return up to
+// Limit rows after the After value. For stable paging Column should be unique
+// and monotonic (e.g. the primary key).
+type Cursor struct {
+	Column string
+	After  any // exclusive lower (or upper, when Desc) bound; nil starts from the beginning
+	Limit  int
+	Desc   bool // descending order
+}
+
+// CursorResult is the metadata for a keyset page.
+type CursorResult struct {
+	HasMore    bool
+	NextCursor any // pass as the next Cursor.After; nil when HasMore is false
+}
+
+// CursorPaginate fetches a keyset page into dest (a *[]T or *[]*T) and returns
+// the cursor metadata. It is seek-based (WHERE Column > After ... LIMIT n), so
+// it stays fast at any depth — unlike offset pagination.
+func (b *Builder) CursorPaginate(ctx context.Context, dest any, c Cursor) (CursorResult, error) {
+	if b.err != nil {
+		return CursorResult{}, b.err
+	}
+	if c.Limit < 1 {
+		return CursorResult{}, fmt.Errorf("playsql: CursorPaginate requires Limit >= 1")
+	}
+
+	op, dir := ">", Asc
+	if c.Desc {
+		op, dir = "<", Desc
+	}
+	if c.After != nil {
+		b.Where(c.Column, op, c.After)
+	}
+	b.OrderBy(c.Column, dir).Limit(c.Limit + 1) // one extra row to detect more
+
+	if err := b.Get(ctx, dest); err != nil {
+		return CursorResult{}, err
+	}
+
+	slice := reflect.ValueOf(dest).Elem()
+	n := slice.Len()
+	res := CursorResult{HasMore: n > c.Limit}
+	if res.HasMore {
+		slice.Set(slice.Slice(0, c.Limit)) // drop the probe row
+		last := slice.Index(c.Limit - 1)
+		if last.Kind() == reflect.Ptr {
+			last = last.Elem()
+		}
+		if idx, ok := b.meta.FieldIndexByColumn(c.Column); ok {
+			res.NextCursor = last.Field(idx).Interface()
+		}
+	}
+	return res, nil
+}
+
+// CursorPage is a typed keyset page: the items plus the cursor metadata.
+type CursorPage[T any] struct {
+	CursorResult
+	Items []T
+}
+
+// CursorPaginate fetches a keyset page of T.
+func (t *TypedBuilder[T]) CursorPaginate(ctx context.Context, c Cursor) (CursorPage[T], error) {
+	var items []T
+	res, err := t.b.CursorPaginate(ctx, &items, c)
+	return CursorPage[T]{CursorResult: res, Items: items}, err
 }
