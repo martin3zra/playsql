@@ -16,8 +16,8 @@ func (g MySQL) CompileInsert(s InsertStmt) (string, bool) {
 	return compileInsert(g, s, false) // LastInsertId, no RETURNING
 }
 
-func (g MySQL) CompileUpdate(s UpdateStmt) string {
-	return compileUpdate(g, s)
+func (g MySQL) CompileUpdate(s UpdateStmt) (string, bool) {
+	return compileUpdate(g, s, "") // MySQL has no RETURNING; Returning is dropped
 }
 
 func (g MySQL) CompileDelete(s DeleteStmt) string {

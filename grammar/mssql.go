@@ -40,7 +40,49 @@ func (g MSSQL) CompileInsert(s InsertStmt) (string, bool) {
 	return sb.String(), returnsID
 }
 
-func (g MSSQL) CompileUpdate(s UpdateStmt) string { return compileUpdate(g, s) }
+// CompileUpdate emits OUTPUT INSERTED.<col> between SET and WHERE — T-SQL's
+// equivalent of RETURNING. With no Returning columns it falls back to the shared
+// helper (no return clause).
+func (g MSSQL) CompileUpdate(s UpdateStmt) (string, bool) {
+	if len(s.Returning) == 0 {
+		return compileUpdate(g, s, "")
+	}
+
+	var sb strings.Builder
+	writeCTEs(g, &sb, s.CTEs)
+
+	sb.WriteString("UPDATE ")
+	sb.WriteString(g.Wrap(s.Table))
+	sb.WriteString(" SET ")
+
+	n := 0
+	for i, c := range s.Columns {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		n++
+		sb.WriteString(g.Wrap(c))
+		sb.WriteString(" = ")
+		sb.WriteString(g.Placeholder(n))
+	}
+
+	sb.WriteString(" OUTPUT ")
+	for i, c := range s.Returning {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString("INSERTED.")
+		sb.WriteString(g.Wrap(c))
+	}
+
+	if len(s.Wheres) > 0 {
+		clause, _ := compileWheres(g, s.Wheres, &n)
+		sb.WriteString(" WHERE ")
+		sb.WriteString(clause)
+	}
+
+	return sb.String(), true
+}
 
 func (g MSSQL) CompileDelete(s DeleteStmt) string { return compileDelete(g, s) }
 

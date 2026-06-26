@@ -155,6 +155,73 @@ db.Model(&User{}).InsertMany(ctx, []data)        // bulk
 db.Model(&User{}).Upsert(ctx, rows, conflictCols, updateCols)
 ```
 
+`UpdateReturning` updates and returns the affected rows, via `RETURNING`
+(PostgreSQL, SQLite) or `OUTPUT INSERTED` (SQL Server). MySQL has no equivalent
+and returns an error.
+
+```go
+var updated []User
+db.Model(&User{}).Where("active", "=", false).
+    Returning("id", "name").
+    UpdateReturning(ctx, map[string]any{"active": true}, &updated)
+
+// Generic form returns []T directly:
+rows, _ := playsql.Query[User](db).
+    WhereEq("active", false).
+    Returning("id", "name").
+    UpdateReturning(ctx, map[string]any{"active": true})
+```
+
+A `WITH` clause (CTE) can prefix an update — compute an aggregate once, then
+update against it. `WithCTE` adds the CTE; `WhereRaw` references it. Both render
+verbatim and must carry **no** bind parameters; never interpolate untrusted input.
+
+```go
+// Mark every product priced below the average as cheap.
+db.Model(&Product{}).
+    WithCTE("avg_price", "SELECT AVG(price) AS value FROM products").
+    WhereRaw("price < (SELECT value FROM avg_price)").
+    Update(ctx, map[string]any{"cheap": true})
+```
+
+## Raw queries
+
+For statements the builder cannot express. `Exec` runs a raw write; `Raw` scans
+a query into a slice of models (column→field mapping from metadata); `RawQuery`
+is its generic form.
+
+```go
+db.Exec(ctx, `UPDATE users SET seen_at = now() WHERE id = $1`, id)
+
+var users []User
+db.Raw(ctx, &users, `SELECT * FROM users WHERE age > ?`, 18)
+
+users, err := playsql.RawQuery[User](db, ctx, `SELECT * FROM users WHERE age > ?`, 18)
+```
+
+`Raw`/`RawQuery` scan into any `db`-tagged struct — it need not be a registered
+model, so aggregates and joins map cleanly:
+
+```go
+type Report struct {
+    Bucket string `db:"bucket"`
+    Total  int64  `db:"total"`
+}
+var rows []Report
+db.Raw(ctx, &rows, `SELECT region AS bucket, SUM(amount) AS total FROM sales GROUP BY region`)
+```
+
+A single value comes back via `RawScalar`; for shapes none of these fit, drop to
+`RawRows` and scan the `*sql.Rows` yourself (you own them — `Close` when done).
+
+```go
+n, _ := playsql.RawScalar[int64](db, ctx, `SELECT COUNT(*) FROM users`)
+
+rows, _ := db.RawRows(ctx, `SELECT name, age FROM users`)
+defer rows.Close()
+for rows.Next() { /* rows.Scan(&name, &age) */ }
+```
+
 ## Relationships
 
 Declared with `play` tags; eager-loaded with `With`, each as one batched query

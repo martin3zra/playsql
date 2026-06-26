@@ -60,10 +60,11 @@ func (b *Builder) Update(ctx context.Context, data map[string]any) (int64, error
 	wheres := b.effectiveWheres(b.trashed)
 	args := append(vals, whereArgs(wheres)...)
 
-	sqlStr := b.sess.grammar.CompileUpdate(grammar.UpdateStmt{
+	sqlStr, _ := b.sess.grammar.CompileUpdate(grammar.UpdateStmt{
 		Table:   b.meta.Table,
 		Columns: cols,
 		Wheres:  wheres,
+		CTEs:    b.ctes,
 	})
 
 	res, err := b.sess.run.ExecContext(ctx, sqlStr, args...)
@@ -71,6 +72,55 @@ func (b *Builder) Update(ctx context.Context, data map[string]any) (int64, error
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// UpdateReturning runs the mass update like Update, but returns the affected
+// rows by scanning them into dest (a pointer to a slice of the model). Columns
+// named via Returning are requested from the database. Requires a dialect with
+// a RETURNING/OUTPUT clause (Postgres, SQLite, SQL Server); MySQL errors.
+func (b *Builder) UpdateReturning(ctx context.Context, data map[string]any, dest any) error {
+	if b.err != nil {
+		return b.err
+	}
+	if len(b.returning) == 0 {
+		return fmt.Errorf("playsql: UpdateReturning requires Returning(...) columns")
+	}
+	if err := b.applyScopes(ctx); err != nil {
+		return err
+	}
+
+	cols, vals := b.fillable(data)
+	if c := b.meta.UpdatedAtColumn; c != "" && !contains(cols, c) {
+		cols = append(cols, c)
+		vals = append(vals, time.Now())
+	}
+	if len(cols) == 0 {
+		return nil
+	}
+
+	wheres := b.effectiveWheres(b.trashed)
+	args := append(vals, whereArgs(wheres)...)
+
+	sqlStr, returnsRows := b.sess.grammar.CompileUpdate(grammar.UpdateStmt{
+		Table:     b.meta.Table,
+		Columns:   cols,
+		Wheres:    wheres,
+		CTEs:      b.ctes,
+		Returning: b.returning,
+	})
+	if !returnsRows {
+		return fmt.Errorf("playsql: dialect %T has no RETURNING for UPDATE", b.sess.grammar)
+	}
+
+	rows, err := b.sess.run.QueryContext(ctx, sqlStr, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	if err := scanRows(rows, dest, b.meta); err != nil {
+		return err
+	}
+	return rows.Err()
 }
 
 // InsertMany bulk-inserts multiple rows in a single statement and returns the

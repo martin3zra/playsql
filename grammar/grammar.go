@@ -22,6 +22,7 @@ const (
 	WhereNotBetween                  // Column NOT BETWEEN ? AND ?
 	WhereNested                      // ( <Group> )
 	WhereJSON                        // <json-extract(Column, Path)> Op ?
+	WhereRaw                         // <Raw> verbatim, no binds
 )
 
 // WhereClause is one compiled predicate. All values are bound, never
@@ -32,6 +33,7 @@ type WhereClause struct {
 	Column  string
 	Op      string
 	Path    string        // WhereJSON: dotted path into the JSON column
+	Raw     string        // WhereRaw: verbatim SQL fragment
 	Value   any           // WhereBasic / WhereJSON
 	Values  []any         // WhereIn / WhereNotIn / WhereBetween
 	Group   []WhereClause // WhereNested
@@ -73,12 +75,25 @@ type InsertStmt struct {
 	Incrementing bool
 }
 
+// CTE is a common table expression prepended to a statement as
+// WITH <Name> AS (<SQL>). SQL is rendered verbatim and must not carry bind
+// parameters — it sits before the statement's own binds, so embedding
+// placeholders would break contiguous numbering on $-style dialects.
+type CTE struct {
+	Name string
+	SQL  string
+}
+
 // UpdateStmt describes an UPDATE. Set columns first, then Wheres; the grammar
-// numbers placeholders contiguously across both.
+// numbers placeholders contiguously across both. Optional CTEs prepend a WITH
+// clause; optional Returning names columns to return from the affected rows
+// (RETURNING on Postgres/SQLite, OUTPUT INSERTED on SQL Server; MySQL has none).
 type UpdateStmt struct {
-	Table   string
-	Columns []string // SET columns
-	Wheres  []WhereClause
+	Table     string
+	Columns   []string // SET columns
+	Wheres    []WhereClause
+	CTEs      []CTE    // optional WITH ... prefix
+	Returning []string // optional columns to return; empty => none
 }
 
 // UpsertStmt describes an INSERT ... ON CONFLICT DO UPDATE. UpdateColumns empty
@@ -97,7 +112,9 @@ type Grammar interface {
 	// CompileInsert returns the statement and whether it yields the new id via a
 	// RETURNING clause (true) versus the driver's LastInsertId (false).
 	CompileInsert(s InsertStmt) (sql string, returnsID bool)
-	CompileUpdate(s UpdateStmt) (sql string)
+	// CompileUpdate returns the statement and whether it yields the affected
+	// rows via a RETURNING/OUTPUT clause (true) — driving Exec vs Query.
+	CompileUpdate(s UpdateStmt) (sql string, returnsRows bool)
 	CompileDelete(s DeleteStmt) (sql string)
 	CompileUpsert(s UpsertStmt) (sql string)
 	Wrap(identifier string) string
@@ -327,9 +344,15 @@ func compileUpsertMySQL(g Grammar, s UpsertStmt) string {
 }
 
 // compileUpdate builds an UPDATE, numbering placeholders contiguously across the
-// SET assignments and the WHERE predicates.
-func compileUpdate(g Grammar, s UpdateStmt) string {
+// SET assignments and the WHERE predicates. An optional WITH prefix is emitted
+// from s.CTEs. When kw is non-empty (the dialect's return keyword, "RETURNING")
+// and columns are requested, a trailing return clause is appended and the second
+// result is true. SQL Server differs (OUTPUT mid-statement) and does not use
+// this helper for returns.
+func compileUpdate(g Grammar, s UpdateStmt, kw string) (string, bool) {
 	var sb strings.Builder
+	writeCTEs(g, &sb, s.CTEs)
+
 	sb.WriteString("UPDATE ")
 	sb.WriteString(g.Wrap(s.Table))
 	sb.WriteString(" SET ")
@@ -351,7 +374,33 @@ func compileUpdate(g Grammar, s UpdateStmt) string {
 		sb.WriteString(clause)
 	}
 
-	return sb.String()
+	if kw != "" && len(s.Returning) > 0 {
+		sb.WriteString(" ")
+		sb.WriteString(kw)
+		sb.WriteString(" ")
+		sb.WriteString(wrapList(g, s.Returning))
+		return sb.String(), true
+	}
+	return sb.String(), false
+}
+
+// writeCTEs emits a "WITH name AS (sql), ..." prefix (with a trailing space)
+// when ctes is non-empty. The SQL bodies are verbatim; see CTE.
+func writeCTEs(g Grammar, sb *strings.Builder, ctes []CTE) {
+	if len(ctes) == 0 {
+		return
+	}
+	sb.WriteString("WITH ")
+	for i, c := range ctes {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString(g.Wrap(c.Name))
+		sb.WriteString(" AS (")
+		sb.WriteString(c.SQL)
+		sb.WriteByte(')')
+	}
+	sb.WriteByte(' ')
 }
 
 // compileWheres assembles a list of predicates, threading a running 1-based
@@ -443,6 +492,10 @@ func compileWheres(g Grammar, clauses []WhereClause, n *int) (string, []any) {
 			*n++
 			sb.WriteString(g.Placeholder(*n))
 			args = append(args, w.Values[0], w.Values[1])
+
+		case WhereRaw:
+			// Verbatim fragment; carries no binds and consumes no placeholder.
+			sb.WriteString(w.Raw)
 
 		case WhereNested:
 			sub, subArgs := compileWheres(g, w.Group, n)

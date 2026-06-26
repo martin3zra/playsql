@@ -41,6 +41,39 @@ func (s *session) Exec(ctx context.Context, query string, args ...any) (sql.Resu
 	return s.run.ExecContext(ctx, query, args...)
 }
 
+// Raw runs an arbitrary query and scans the result into dest, a pointer to a
+// slice of model structs or struct pointers (*[]T or *[]*T). Column-to-field
+// mapping uses the element type's metadata; unmapped columns are discarded. Use
+// it for queries the builder cannot express; see RawQuery for a generic form.
+func (s *session) Raw(ctx context.Context, dest any, query string, args ...any) error {
+	meta, err := sliceElemMeta(dest)
+	if err != nil {
+		return err
+	}
+	rows, err := s.run.QueryContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	if err := scanRows(rows, dest, meta); err != nil {
+		return err
+	}
+	return rows.Err()
+}
+
+// RawRows runs a query and returns the raw *sql.Rows for manual scanning — an
+// escape hatch for result shapes Raw cannot map (multiple result sets, columns
+// scanned into locals, etc.). The caller owns the rows and must Close them.
+func (s *session) RawRows(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	return s.run.QueryContext(ctx, query, args...)
+}
+
+// rawRow runs a query and returns the raw *sql.Row; it backs the generic
+// RawScalar. Unexported so only *DB/*Tx (same package) satisfy that interface.
+func (s *session) rawRow(ctx context.Context, query string, args ...any) *sql.Row {
+	return s.run.QueryRowContext(ctx, query, args...)
+}
+
 // DB is a pooled connection. It can begin transactions and be closed.
 type DB struct {
 	*session

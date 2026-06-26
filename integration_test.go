@@ -57,6 +57,16 @@ type itProfile struct {
 
 func (itProfile) TableName() string { return "it_profiles" }
 
+type itWidget struct {
+	playsql.Model
+	ID    int64  `db:"id" play:"pk,incrementing"`
+	Name  string `db:"name" play:"fillable"`
+	Price int64  `db:"price" play:"fillable"`
+	Cheap bool   `db:"cheap" play:"fillable"`
+}
+
+func (itWidget) TableName() string { return "it_widgets" }
+
 func env(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -91,6 +101,8 @@ var ddl = map[string][]string{
 		`CREATE TABLE it_books (id BIGSERIAL PRIMARY KEY, author_id BIGINT, title TEXT)`,
 		`DROP TABLE IF EXISTS it_profiles`,
 		`CREATE TABLE it_profiles (id BIGSERIAL PRIMARY KEY, name TEXT, prefs JSONB)`,
+		`DROP TABLE IF EXISTS it_widgets`,
+		`CREATE TABLE it_widgets (id BIGSERIAL PRIMARY KEY, name TEXT, price BIGINT, cheap BOOLEAN DEFAULT FALSE)`,
 	},
 	"mysql": {
 		`DROP TABLE IF EXISTS it_books`,
@@ -101,6 +113,8 @@ var ddl = map[string][]string{
 		`CREATE TABLE it_books (id BIGINT AUTO_INCREMENT PRIMARY KEY, author_id BIGINT, title VARCHAR(191))`,
 		`DROP TABLE IF EXISTS it_profiles`,
 		`CREATE TABLE it_profiles (id BIGINT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(191), prefs JSON)`,
+		`DROP TABLE IF EXISTS it_widgets`,
+		`CREATE TABLE it_widgets (id BIGINT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(191), price BIGINT, cheap BOOLEAN DEFAULT 0)`,
 	},
 	"mssql": {
 		`DROP TABLE IF EXISTS it_books`,
@@ -111,6 +125,8 @@ var ddl = map[string][]string{
 		`CREATE TABLE it_books (id BIGINT IDENTITY(1,1) PRIMARY KEY, author_id BIGINT, title NVARCHAR(191))`,
 		`DROP TABLE IF EXISTS it_profiles`,
 		`CREATE TABLE it_profiles (id BIGINT IDENTITY(1,1) PRIMARY KEY, name NVARCHAR(191), prefs NVARCHAR(MAX))`,
+		`DROP TABLE IF EXISTS it_widgets`,
+		`CREATE TABLE it_widgets (id BIGINT IDENTITY(1,1) PRIMARY KEY, name NVARCHAR(191), price BIGINT, cheap BIT DEFAULT 0)`,
 	},
 }
 
@@ -131,7 +147,110 @@ func TestIntegration(t *testing.T) {
 				}
 			}
 			runSuite(t, db)
+			runRawReturningSuite(t, db, drv.dialect)
 		})
+	}
+}
+
+// runRawReturningSuite exercises Raw/RawQuery, UpdateReturning (RETURNING /
+// OUTPUT), and CTE updates (WithCTE + WhereRaw) against a live database.
+func runRawReturningSuite(t *testing.T, db *playsql.DB, dialect string) {
+	ctx := context.Background()
+
+	seed := []map[string]any{
+		{"name": "a", "price": int64(5)},
+		{"name": "b", "price": int64(50)},
+		{"name": "c", "price": int64(500)},
+	}
+	if _, err := db.Model(&itWidget{}).InsertMany(ctx, seed); err != nil {
+		t.Fatalf("seed widgets: %v", err)
+	}
+
+	// Raw read into a slice.
+	var pricey []itWidget
+	if err := db.Raw(ctx, &pricey, `SELECT id, name, price FROM it_widgets WHERE price >= 50 ORDER BY price`); err != nil {
+		t.Fatalf("raw: %v", err)
+	}
+	if len(pricey) != 2 || pricey[0].Name != "b" || pricey[1].Name != "c" {
+		t.Fatalf("raw rows wrong: %+v", pricey)
+	}
+
+	// Generic RawQuery.
+	all, err := playsql.RawQuery[itWidget](db, ctx, `SELECT * FROM it_widgets ORDER BY id`)
+	if err != nil {
+		t.Fatalf("rawquery: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("rawquery count: %d", len(all))
+	}
+
+	// RawScalar: single value.
+	count, err := playsql.RawScalar[int64](db, ctx, `SELECT COUNT(*) FROM it_widgets`)
+	if err != nil {
+		t.Fatalf("rawscalar: %v", err)
+	}
+	if count != 3 {
+		t.Fatalf("rawscalar count = %d, want 3", count)
+	}
+
+	// RawRows: manual scan over the raw result.
+	rrows, err := db.RawRows(ctx, `SELECT name FROM it_widgets ORDER BY price`)
+	if err != nil {
+		t.Fatalf("rawrows: %v", err)
+	}
+	var names []string
+	for rrows.Next() {
+		var name string
+		if err := rrows.Scan(&name); err != nil {
+			rrows.Close()
+			t.Fatalf("rawrows scan: %v", err)
+		}
+		names = append(names, name)
+	}
+	rrows.Close()
+	if len(names) != 3 || names[0] != "a" {
+		t.Fatalf("rawrows wrong: %v", names)
+	}
+
+	// UpdateReturning: RETURNING (pg/sqlite) or OUTPUT (mssql). MySQL has none.
+	if dialect == "mysql" {
+		var dest []itWidget
+		err := db.Model(&itWidget{}).WhereEq("name", "a").
+			Returning("id").UpdateReturning(ctx, map[string]any{"price": int64(7)}, &dest)
+		if err == nil {
+			t.Fatal("mysql UpdateReturning should error (no RETURNING)")
+		}
+	} else {
+		var updated []itWidget
+		err := db.Model(&itWidget{}).Where("price", ">", int64(40)).
+			Returning("id", "name", "price").
+			UpdateReturning(ctx, map[string]any{"cheap": true}, &updated)
+		if err != nil {
+			t.Fatalf("update returning: %v", err)
+		}
+		if len(updated) != 2 {
+			t.Fatalf("want 2 returned, got %d: %+v", len(updated), updated)
+		}
+		for _, w := range updated {
+			if w.Name == "" || w.Price <= 40 {
+				t.Fatalf("returned row not hydrated: %+v", w)
+			}
+		}
+	}
+
+	// CTE update: mark rows below the average price as cheap.
+	if _, err := db.Model(&itWidget{}).Update(ctx, map[string]any{"cheap": false}); err != nil {
+		t.Fatalf("reset cheap: %v", err)
+	}
+	n, err := db.Model(&itWidget{}).
+		WithCTE("avg_price", "SELECT AVG(price) AS value FROM it_widgets").
+		WhereRaw("price < (SELECT value FROM avg_price)").
+		Update(ctx, map[string]any{"cheap": true})
+	if err != nil {
+		t.Fatalf("cte update: %v", err)
+	}
+	if n != 2 { // avg(5,50,500)=185; 5 and 50 are below
+		t.Fatalf("cte update affected %d, want 2", n)
 	}
 }
 

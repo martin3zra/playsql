@@ -160,7 +160,7 @@ func (s *session) Update(ctx context.Context, model any) error {
 
 	values = append(values, pkVal) // bound after the SET values
 
-	sqlStr := s.grammar.CompileUpdate(grammar.UpdateStmt{
+	sqlStr, _ := s.grammar.CompileUpdate(grammar.UpdateStmt{
 		Table:   meta.Table,
 		Columns: columns,
 		Wheres: []grammar.WhereClause{
@@ -223,7 +223,7 @@ func (s *session) Delete(ctx context.Context, model any) error {
 
 	if meta.SoftDeletes {
 		now := time.Now()
-		sqlStr := s.grammar.CompileUpdate(grammar.UpdateStmt{
+		sqlStr, _ := s.grammar.CompileUpdate(grammar.UpdateStmt{
 			Table:   meta.Table,
 			Columns: []string{meta.DeletedAtColumn},
 			Wheres:  []grammar.WhereClause{{Kind: grammar.WhereBasic, Column: meta.PrimaryKey, Op: "=", Value: pkVal}},
@@ -272,7 +272,7 @@ func (s *session) Restore(ctx context.Context, model any) error {
 		return err
 	}
 
-	sqlStr := s.grammar.CompileUpdate(grammar.UpdateStmt{
+	sqlStr, _ := s.grammar.CompileUpdate(grammar.UpdateStmt{
 		Table:   meta.Table,
 		Columns: []string{meta.DeletedAtColumn},
 		Wheres:  []grammar.WhereClause{{Kind: grammar.WhereBasic, Column: meta.PrimaryKey, Op: "=", Value: pkVal}},

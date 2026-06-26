@@ -1,6 +1,9 @@
 package playsql
 
-import "context"
+import (
+	"context"
+	"database/sql"
+)
 
 // Query starts a type-parameterized query for model T against a DB or Tx. It is
 // a thin, allocation-light wrapper over *Builder: the terminal methods return
@@ -13,6 +16,35 @@ import "context"
 func Query[T any](src interface{ Model(any) *Builder }) *TypedBuilder[T] {
 	var zero T
 	return &TypedBuilder[T]{b: src.Model(&zero)}
+}
+
+// RawQuery runs an arbitrary query and scans the rows into a []T, mapping
+// columns to fields via T's metadata. It is the generic counterpart to
+// (*session).Raw — src is a *DB or *Tx.
+//
+//	users, err := playsql.RawQuery[User](db, ctx,
+//		"SELECT * FROM users WHERE age > ?", 18)
+func RawQuery[T any](src interface {
+	Raw(ctx context.Context, dest any, query string, args ...any) error
+}, ctx context.Context, query string, args ...any) ([]T, error) {
+	var out []T
+	if err := src.Raw(ctx, &out, query, args...); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// RawScalar runs a query expected to yield a single row with a single column and
+// returns it as T. It wraps QueryRow().Scan, so it returns sql.ErrNoRows when no
+// row matches. src is a *DB or *Tx.
+//
+//	n, err := playsql.RawScalar[int64](db, ctx, `SELECT COUNT(*) FROM users`)
+func RawScalar[T any](src interface {
+	rawRow(ctx context.Context, query string, args ...any) *sql.Row
+}, ctx context.Context, query string, args ...any) (T, error) {
+	var v T
+	err := src.rawRow(ctx, query, args...).Scan(&v)
+	return v, err
 }
 
 // TypedBuilder is a generic view over *Builder. Builder methods are mirrored so
@@ -39,6 +71,11 @@ func (t *TypedBuilder[T]) WhereEq(column string, value any) *TypedBuilder[T] {
 
 func (t *TypedBuilder[T]) OrWhere(column, op string, value any) *TypedBuilder[T] {
 	t.b.OrWhere(column, op, value)
+	return t
+}
+
+func (t *TypedBuilder[T]) WhereRaw(sql string) *TypedBuilder[T] {
+	t.b.WhereRaw(sql)
 	return t
 }
 
@@ -161,6 +198,28 @@ func (t *TypedBuilder[T]) Create(ctx context.Context, data map[string]any) (T, e
 // Update mass-assigns data to all matching rows and returns the rows affected.
 func (t *TypedBuilder[T]) Update(ctx context.Context, data map[string]any) (int64, error) {
 	return t.b.Update(ctx, data)
+}
+
+// Returning names the columns UpdateReturning returns from the affected rows.
+func (t *TypedBuilder[T]) Returning(columns ...string) *TypedBuilder[T] {
+	t.b.Returning(columns...)
+	return t
+}
+
+// WithCTE prepends a CTE (WITH name AS (rawSQL)) to an Update/UpdateReturning.
+func (t *TypedBuilder[T]) WithCTE(name, rawSQL string) *TypedBuilder[T] {
+	t.b.WithCTE(name, rawSQL)
+	return t
+}
+
+// UpdateReturning mass-assigns data and returns the affected rows as a []T.
+// Requires Returning(...) columns and a dialect with RETURNING/OUTPUT.
+func (t *TypedBuilder[T]) UpdateReturning(ctx context.Context, data map[string]any) ([]T, error) {
+	var out []T
+	if err := t.b.UpdateReturning(ctx, data, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // InsertMany bulk-inserts rows and returns the number inserted.

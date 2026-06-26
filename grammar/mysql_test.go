@@ -50,7 +50,7 @@ func TestMySQL_Upsert(t *testing.T) {
 }
 
 func TestMySQL_UpdateContiguous(t *testing.T) {
-	sql := MySQL{}.CompileUpdate(UpdateStmt{
+	sql, _ := MySQL{}.CompileUpdate(UpdateStmt{
 		Table:   "users",
 		Columns: []string{"name", "age"},
 		Wheres:  []WhereClause{{Kind: WhereBasic, Column: "id", Op: "=", Value: 7}},

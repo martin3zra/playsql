@@ -37,6 +37,8 @@ type Builder struct {
 	scopeWheres []grammar.WhereClause // predicates added by global scopes
 	orders      []grammar.OrderClause
 	withs       []withClause
+	ctes        []grammar.CTE // WITH prefixes for Update/UpdateReturning
+	returning   []string      // columns for UpdateReturning
 	limit       int
 	offset      int
 	trashed     trashedMode
@@ -83,6 +85,19 @@ func (b *Builder) OrWhere(column, op string, value any) *Builder {
 // WhereEq is shorthand for Where(column, "=", value).
 func (b *Builder) WhereEq(column string, value any) *Builder {
 	return b.Where(column, "=", value)
+}
+
+// WhereRaw adds a verbatim SQL predicate (AND). The fragment is emitted as-is
+// and must carry no bind parameters — it is an escape hatch for expressions the
+// builder cannot model, e.g. referencing a CTE added via WithCTE. Never
+// interpolate untrusted input into it.
+func (b *Builder) WhereRaw(sql string) *Builder {
+	return b.add(grammar.WhereClause{Kind: grammar.WhereRaw, Boolean: "AND", Raw: sql})
+}
+
+// OrWhereRaw is WhereRaw joined with OR.
+func (b *Builder) OrWhereRaw(sql string) *Builder {
+	return b.add(grammar.WhereClause{Kind: grammar.WhereRaw, Boolean: "OR", Raw: sql})
 }
 
 // WhereIn matches column against a set. Pass values variadically or as a single
@@ -287,6 +302,26 @@ func (b *Builder) Take(n int) *Builder { return b.Limit(n) }
 // Skip is an alias for Offset (Eloquent-style).
 func (b *Builder) Skip(n int) *Builder { return b.Offset(n) }
 
+// Returning names the columns UpdateReturning should return from the affected
+// rows (emitted as RETURNING, or OUTPUT INSERTED on SQL Server).
+func (b *Builder) Returning(columns ...string) *Builder {
+	b.returning = columns
+	return b
+}
+
+// WithCTE prepends a common table expression (WITH name AS (rawSQL)) to an
+// Update/UpdateReturning. rawSQL is rendered verbatim and must carry no bind
+// parameters (see grammar.CTE). Pair it with WhereRaw to reference the CTE.
+//
+//	db.Model(Product{}).
+//		WithCTE("avg_price", "SELECT AVG(price) AS value FROM products").
+//		WhereRaw("price < (SELECT value FROM avg_price)").
+//		Update(ctx, map[string]any{"cheap": true})
+func (b *Builder) WithCTE(name, rawSQL string) *Builder {
+	b.ctes = append(b.ctes, grammar.CTE{Name: name, SQL: rawSQL})
+	return b
+}
+
 // compiled assembles the dialect-neutral query from the builder's state.
 func (b *Builder) compiled() grammar.CompiledQuery {
 	cols := b.columns
@@ -402,7 +437,7 @@ func (b *Builder) Delete(ctx context.Context) (int64, error) {
 	if b.meta.SoftDeletes {
 		// Soft delete: stamp deleted_at on rows not already trashed.
 		wheres := b.effectiveWheres(trashedExclude)
-		sqlStr := b.sess.grammar.CompileUpdate(grammar.UpdateStmt{
+		sqlStr, _ := b.sess.grammar.CompileUpdate(grammar.UpdateStmt{
 			Table:   b.meta.Table,
 			Columns: []string{b.meta.DeletedAtColumn},
 			Wheres:  wheres,
@@ -457,7 +492,7 @@ func (b *Builder) Restore(ctx context.Context) (int64, error) {
 
 	// Operate on trashed rows regardless of the builder's trashed mode.
 	wheres := b.effectiveWheres(trashedOnly)
-	sqlStr := b.sess.grammar.CompileUpdate(grammar.UpdateStmt{
+	sqlStr, _ := b.sess.grammar.CompileUpdate(grammar.UpdateStmt{
 		Table:   b.meta.Table,
 		Columns: []string{b.meta.DeletedAtColumn},
 		Wheres:  wheres,

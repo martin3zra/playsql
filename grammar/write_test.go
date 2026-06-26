@@ -43,7 +43,7 @@ func TestCompileInsert_PostgresNonIncrementing(t *testing.T) {
 
 func TestCompileUpdate_ContiguousPlaceholders(t *testing.T) {
 	// SET uses $1,$2; WHERE must continue at $3.
-	sql := Postgres{}.CompileUpdate(UpdateStmt{
+	sql, _ := Postgres{}.CompileUpdate(UpdateStmt{
 		Table:   "users",
 		Columns: []string{"name", "age"},
 		Wheres:  []WhereClause{{Kind: WhereBasic, Column: "id", Op: "=", Value: 7}},

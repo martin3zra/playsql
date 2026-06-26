@@ -148,3 +148,21 @@ func scanInto(structVal reflect.Value, cols []string, meta *metadata.ModelMeta) 
 }
 
 var anyType = reflect.TypeOf((*any)(nil)).Elem()
+
+// sliceElemMeta derives model metadata from dest, a pointer to a slice of
+// structs or struct pointers (*[]T or *[]*T). It is used by raw queries, where
+// there is no Builder to carry the metadata.
+func sliceElemMeta(dest any) (*metadata.ModelMeta, error) {
+	t := reflect.TypeOf(dest)
+	if t == nil || t.Kind() != reflect.Ptr || t.Elem().Kind() != reflect.Slice {
+		return nil, fmt.Errorf("playsql: dest must be a pointer to a slice, got %T", dest)
+	}
+	elem := t.Elem().Elem()
+	for elem.Kind() == reflect.Ptr {
+		elem = elem.Elem()
+	}
+	if elem.Kind() != reflect.Struct {
+		return nil, fmt.Errorf("playsql: dest element must be a struct, got %s", elem.Kind())
+	}
+	return metadata.For(reflect.New(elem).Interface()), nil
+}

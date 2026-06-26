@@ -15,8 +15,8 @@ func (g SQLite) CompileInsert(s InsertStmt) (string, bool) {
 	return compileInsert(g, s, false) // uses LastInsertId
 }
 
-func (g SQLite) CompileUpdate(s UpdateStmt) string {
-	return compileUpdate(g, s)
+func (g SQLite) CompileUpdate(s UpdateStmt) (string, bool) {
+	return compileUpdate(g, s, "RETURNING") // RETURNING since SQLite 3.35
 }
 
 func (g SQLite) CompileDelete(s DeleteStmt) string {
