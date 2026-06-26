@@ -44,6 +44,9 @@ func (b *Builder) Update(ctx context.Context, data map[string]any) (int64, error
 	if b.err != nil {
 		return 0, b.err
 	}
+	if err := b.applyScopes(ctx); err != nil {
+		return 0, err
+	}
 
 	cols, vals := b.fillable(data)
 	if c := b.meta.UpdatedAtColumn; c != "" && !contains(cols, c) {

@@ -10,8 +10,6 @@ import (
 	"github.com/martin3zra/playsql/metadata"
 )
 
-// Builder is the only query entry point. It is created fresh per query (never
-// reused) and is agnostic to whether it runs on a connection or a transaction.
 // Direction is a sort order. Use Asc or Desc.
 type Direction string
 
@@ -29,21 +27,32 @@ const (
 	trashedOnly                       // OnlyTrashed: only soft-deleted rows
 )
 
+// Builder is the only query entry point. It is created fresh per query (never
+// reused) and is agnostic to whether it runs on a connection or a transaction.
 type Builder struct {
-	sess    *session
-	meta    *metadata.ModelMeta
-	columns []string
-	wheres  []grammar.WhereClause
-	orders  []grammar.OrderClause
-	withs   []withClause
-	limit   int
-	offset  int
-	trashed trashedMode
-	err     error // first construction error; surfaced by terminal ops
+	sess        *session
+	meta        *metadata.ModelMeta
+	columns     []string
+	wheres      []grammar.WhereClause
+	scopeWheres []grammar.WhereClause // predicates added by global scopes
+	orders      []grammar.OrderClause
+	withs       []withClause
+	limit       int
+	offset      int
+	trashed     trashedMode
+	scopes      []Scope
+	inScope     bool  // routes add() into scopeWheres while a scope applies
+	scopesDone  bool  // scopes applied (or skipped) once already
+	skipScopes  bool  // WithoutGlobalScopes
+	err         error // first construction error; surfaced by terminal ops
 }
 
 func newBuilder(s *session, model any) *Builder {
-	return &Builder{sess: s, meta: metadata.For(model)}
+	b := &Builder{sess: s, meta: metadata.For(model)}
+	if sc, ok := model.(Scoper); ok {
+		b.scopes = sc.Scopes()
+	}
+	return b
 }
 
 // fail records the first construction error. Builder methods stay chainable; the
@@ -141,8 +150,33 @@ func (b *Builder) group(boolean string, fn func(*Builder)) *Builder {
 }
 
 func (b *Builder) add(w grammar.WhereClause) *Builder {
-	b.wheres = append(b.wheres, w)
+	if b.inScope {
+		b.scopeWheres = append(b.scopeWheres, w)
+	} else {
+		b.wheres = append(b.wheres, w)
+	}
 	return b
+}
+
+// WithoutGlobalScopes skips the model's global scopes for this query.
+func (b *Builder) WithoutGlobalScopes() *Builder { b.skipScopes = true; return b }
+
+// applyScopes runs the model's global scopes once, routing the predicates they
+// add into scopeWheres. A scope returning an error aborts the query.
+func (b *Builder) applyScopes(ctx context.Context) error {
+	if b.scopesDone || b.skipScopes || len(b.scopes) == 0 {
+		b.scopesDone = true
+		return nil
+	}
+	b.scopesDone = true
+	b.inScope = true
+	defer func() { b.inScope = false }()
+	for _, s := range b.scopes {
+		if err := s.Apply(ctx, b); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // expandValues lets WhereIn accept either variadic values or a single slice.
@@ -211,22 +245,28 @@ func (b *Builder) softDeletePredicate(mode trashedMode) *grammar.WhereClause {
 	}
 }
 
-// effectiveWheres prepends the soft-delete predicate (if any) and wraps the
-// user predicates in a group so precedence stays correct:
+// effectiveWheres composes the final predicate list as
 //
-//	deleted_at IS NULL AND ( <user wheres> )
+//	<scope predicates> AND <deleted_at filter> AND ( <user predicates> )
+//
+// Scope and soft-delete predicates are leading ANDs; the user predicates are
+// wrapped in a group (when any leading predicate exists) so a user OR can't
+// escape them. With no leading predicate the user wheres pass through unwrapped,
+// preserving their own boolean structure.
 func (b *Builder) effectiveWheres(mode trashedMode) []grammar.WhereClause {
-	pred := b.softDeletePredicate(mode)
-	if pred == nil {
+	var lead []grammar.WhereClause
+	lead = append(lead, b.scopeWheres...)
+	if pred := b.softDeletePredicate(mode); pred != nil {
+		lead = append(lead, *pred)
+	}
+
+	if len(lead) == 0 {
 		return b.wheres
 	}
 	if len(b.wheres) == 0 {
-		return []grammar.WhereClause{*pred}
+		return lead
 	}
-	return []grammar.WhereClause{
-		*pred,
-		{Kind: grammar.WhereNested, Boolean: "AND", Group: b.wheres},
-	}
+	return append(lead, grammar.WhereClause{Kind: grammar.WhereNested, Boolean: "AND", Group: b.wheres})
 }
 
 // OrderBy adds an ORDER BY term. Call repeatedly for multiple sort keys.
@@ -268,6 +308,9 @@ func (b *Builder) Get(ctx context.Context, dest any) error {
 	if b.err != nil {
 		return b.err
 	}
+	if err := b.applyScopes(ctx); err != nil {
+		return err
+	}
 
 	sqlStr, args := b.sess.grammar.CompileSelect(b.compiled())
 
@@ -294,6 +337,9 @@ func (b *Builder) Get(ctx context.Context, dest any) error {
 func (b *Builder) First(ctx context.Context, dest any) error {
 	if b.err != nil {
 		return b.err
+	}
+	if err := b.applyScopes(ctx); err != nil {
+		return err
 	}
 
 	b.limit = 1
@@ -325,6 +371,9 @@ func (b *Builder) Count(ctx context.Context) (int64, error) {
 	if b.err != nil {
 		return 0, b.err
 	}
+	if err := b.applyScopes(ctx); err != nil {
+		return 0, err
+	}
 
 	q := b.compiled()
 	q.Aggregate = "COUNT(*)"
@@ -345,6 +394,9 @@ func (b *Builder) Count(ctx context.Context) (int64, error) {
 func (b *Builder) Delete(ctx context.Context) (int64, error) {
 	if b.err != nil {
 		return 0, b.err
+	}
+	if err := b.applyScopes(ctx); err != nil {
+		return 0, err
 	}
 
 	if b.meta.SoftDeletes {
@@ -371,15 +423,20 @@ func (b *Builder) ForceDelete(ctx context.Context) (int64, error) {
 	if b.err != nil {
 		return 0, b.err
 	}
+	if err := b.applyScopes(ctx); err != nil {
+		return 0, err
+	}
 	return b.hardDelete(ctx)
 }
 
 func (b *Builder) hardDelete(ctx context.Context) (int64, error) {
+	// trashedInclude: no soft-delete filter, but scope predicates still apply.
+	wheres := b.effectiveWheres(trashedInclude)
 	sqlStr := b.sess.grammar.CompileDelete(grammar.DeleteStmt{
 		Table:  b.meta.Table,
-		Wheres: b.wheres,
+		Wheres: wheres,
 	})
-	res, err := b.sess.run.ExecContext(ctx, sqlStr, whereArgs(b.wheres)...)
+	res, err := b.sess.run.ExecContext(ctx, sqlStr, whereArgs(wheres)...)
 	if err != nil {
 		return 0, err
 	}
@@ -393,6 +450,9 @@ func (b *Builder) Restore(ctx context.Context) (int64, error) {
 	}
 	if !b.meta.SoftDeletes {
 		return 0, ErrNotSoftDeletable
+	}
+	if err := b.applyScopes(ctx); err != nil {
+		return 0, err
 	}
 
 	// Operate on trashed rows regardless of the builder's trashed mode.

@@ -172,6 +172,31 @@ db.Restore(ctx, &u)
 db.ForceDelete(ctx, &u)
 ```
 
+## Global scopes
+
+A model can declare scopes that are applied to every query automatically — for
+multi-tenancy, active-only filters, etc. A scope reads request-scoped values
+from `ctx` and may reject the query (so a missing tenant fails instead of leaking
+rows).
+
+```go
+func (Post) Scopes() []playsql.Scope { return []playsql.Scope{TenantScope{}} }
+
+type TenantScope struct{}
+func (TenantScope) Apply(ctx context.Context, b *playsql.Builder) error {
+    tid, ok := ctx.Value(tenantKey{}).(int64)
+    if !ok { return errors.New("no tenant in context") }
+    b.WhereEq("tenant_id", tid)
+    return nil
+}
+
+db.Model(&Post{}).Get(ctx, &posts)              // scoped to the ctx tenant
+db.Model(&Post{}).WithoutGlobalScopes().Get(...) // bypass
+```
+
+Scopes apply to reads, mass updates, and deletes; user predicates are grouped so
+a scope can't be escaped by an `OR`.
+
 ## Casts
 
 `play:"cast=json"` (de)serializes struct/slice/map columns. Register custom
