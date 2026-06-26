@@ -136,3 +136,44 @@ func (t *TypedBuilder[T]) Find(ctx context.Context, id any) (T, error) {
 func (t *TypedBuilder[T]) Count(ctx context.Context) (int64, error) {
 	return t.b.Count(ctx)
 }
+
+// GetPtr returns all matching rows as a slice of *T.
+func (t *TypedBuilder[T]) GetPtr(ctx context.Context) ([]*T, error) {
+	var out []*T
+	err := t.b.Get(ctx, &out)
+	return out, err
+}
+
+// --- writes (map-based, mass-assignment filtered) ---
+
+// Insert mass-assigns data as a new row and returns the generated id.
+func (t *TypedBuilder[T]) Insert(ctx context.Context, data map[string]any) (int64, error) {
+	return t.b.Insert(ctx, data)
+}
+
+// Create inserts data and returns the new row hydrated as a T.
+func (t *TypedBuilder[T]) Create(ctx context.Context, data map[string]any) (T, error) {
+	var out T
+	err := t.b.Create(ctx, &out, data)
+	return out, err
+}
+
+// Update mass-assigns data to all matching rows and returns the rows affected.
+func (t *TypedBuilder[T]) Update(ctx context.Context, data map[string]any) (int64, error) {
+	return t.b.Update(ctx, data)
+}
+
+// InsertMany bulk-inserts rows and returns the number inserted.
+func (t *TypedBuilder[T]) InsertMany(ctx context.Context, rows []map[string]any) (int64, error) {
+	return t.b.InsertMany(ctx, rows)
+}
+
+// Upsert inserts rows, updating updateColumns on a conflict over conflictColumns.
+func (t *TypedBuilder[T]) Upsert(ctx context.Context, rows []map[string]any, conflictColumns, updateColumns []string) (int64, error) {
+	return t.b.Upsert(ctx, rows, conflictColumns, updateColumns)
+}
+
+// Delete removes all matching rows (soft-deletes a soft-deletable model).
+func (t *TypedBuilder[T]) Delete(ctx context.Context) (int64, error) {
+	return t.b.Delete(ctx)
+}
