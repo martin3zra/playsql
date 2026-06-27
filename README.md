@@ -246,6 +246,65 @@ Kinds: `hasOne`, `hasMany`, `belongsTo`, `belongsToMany` (with `withPivot`),
 `hasOneThrough`, `hasManyThrough`. Keys follow Eloquent conventions and are
 overridable (`foreignKey=`, `localKey=`, `through=`, …).
 
+### Filtering by relationship existence
+
+Limit parents by whether a related row exists — compiled as a correlated
+`EXISTS` subquery, no JOIN. `Has`/`DoesntHave` check presence/absence; `WhereHas`
+adds constraints to the related query; `HasCount` compares the related count.
+Relations are named by field and may be dotted for nesting.
+
+```go
+// posts that have at least one comment
+playsql.Query[Post](db).Has("Comments").Get(ctx)
+
+// posts with three or more comments
+playsql.Query[Post](db).HasCount("Comments", ">=", 3).Get(ctx)
+
+// posts with no comments
+playsql.Query[Post](db).DoesntHave("Comments").Get(ctx)
+
+// posts having a comment whose content matches
+playsql.Query[Post](db).WhereHas("Comments", func(q *playsql.Builder) {
+    q.Where("content", "like", "code%")
+}).Get(ctx)
+
+// shorthand for a single related condition
+playsql.Query[Post](db).WhereRelation("Comments", "approved", "=", false).Get(ctx)
+
+// nested: posts having a comment that has an image
+playsql.Query[Post](db).Has("Comments.Images").Get(ctx)
+```
+
+Works the same across every relation kind:
+
+```go
+// belongsTo — comments that belong to an existing post
+playsql.Query[Comment](db).Has("Post").Get(ctx)
+
+// belongsToMany — users that have any role (through the pivot)
+playsql.Query[User](db).Has("Roles").Get(ctx)
+// ...users with three or more roles (counts pivot rows)
+playsql.Query[User](db).HasCount("Roles", ">=", 3).Get(ctx)
+// ...users having the "admin" role
+playsql.Query[User](db).WhereRelation("Roles", "name", "=", "admin").Get(ctx)
+
+// hasManyThrough — countries that have posts (through users)
+playsql.Query[Country](db).Has("Posts").Get(ctx)
+// ...countries with ten or more posts (counts far rows exactly)
+playsql.Query[Country](db).HasCount("Posts", ">=", 10).Get(ctx)
+// ...countries with no posts
+playsql.Query[Country](db).DoesntHave("Posts").Get(ctx)
+```
+
+Also: `OrHas`, `OrDoesntHave`, `OrWhereHas`, `OrWhereDoesntHave`,
+`WhereHasCount`, `OrWhereRelation`. Soft-deleted related rows are excluded by
+default. All relation kinds are supported — `hasMany`, `hasOne`, `belongsTo`,
+`belongsToMany`, `hasManyThrough`, `hasOneThrough` — compiled as nested `EXISTS`
+through the pivot/intermediate table (no JOIN). The count form is not allowed on
+nested (dotted) paths. `belongsToMany` counts pivot rows (equal to the related
+count for a duplicate-free pivot); `has*Through` counts the far rows exactly via
+an `IN` subquery.
+
 ## Soft deletes
 
 Add a `deleted_at` field tagged `play:"softdelete"`. Queries then exclude

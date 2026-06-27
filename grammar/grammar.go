@@ -23,6 +23,9 @@ const (
 	WhereNested                      // ( <Group> )
 	WhereJSON                        // <json-extract(Column, Path)> Op ?
 	WhereRaw                         // <Raw> verbatim, no binds
+	WhereColumn                      // Column Op Second (both wrapped), no bind
+	WhereExists                      // [NOT] EXISTS (...) or (SELECT COUNT(*) ...) Op ?
+	WhereInSub                       // Column IN (SELECT Sub.Column FROM Sub.Table WHERE ...)
 )
 
 // WhereClause is one compiled predicate. All values are bound, never
@@ -32,11 +35,39 @@ type WhereClause struct {
 	Boolean string // "AND" (default) | "OR"
 	Column  string
 	Op      string
-	Path    string        // WhereJSON: dotted path into the JSON column
-	Raw     string        // WhereRaw: verbatim SQL fragment
-	Value   any           // WhereBasic / WhereJSON
-	Values  []any         // WhereIn / WhereNotIn / WhereBetween
-	Group   []WhereClause // WhereNested
+	Path    string          // WhereJSON: dotted path into the JSON column
+	Raw     string          // WhereRaw: verbatim SQL fragment
+	Second  string          // WhereColumn: the right-hand column (wrapped, not bound)
+	Value   any             // WhereBasic / WhereJSON
+	Values  []any           // WhereIn / WhereNotIn / WhereBetween
+	Group   []WhereClause   // WhereNested
+	Exists  *RelationExists // WhereExists
+	Sub     *Subselect      // WhereInSub
+}
+
+// Subselect is a single-column correlated subquery used by WhereInSub:
+// "SELECT Column FROM Table WHERE Wheres". It backs the exact far-row count for
+// has*Through existence. Wheres carries the correlation (and is bind-free in that
+// use), threaded through the outer placeholder counter.
+type Subselect struct {
+	Column string // projected (and compared-against) column, qualified
+	Table  string
+	Wheres []WhereClause
+}
+
+// RelationExists describes a correlated subquery predicate (the EXISTS form
+// behind Has/WhereHas/DoesntHave). On holds the correlation (and any join)
+// predicates — WhereColumn comparisons that carry no binds; Wheres holds the
+// closure constraints and may itself contain nested RelationExists. With CountOp
+// empty it renders "[NOT] EXISTS (SELECT 1 FROM Table WHERE ...)"; with CountOp
+// set it renders "(SELECT COUNT(*) FROM Table WHERE ...) CountOp ?".
+type RelationExists struct {
+	Not      bool          // NOT EXISTS (doesntHave); ignored when CountOp is set
+	Table    string        // the inner (related) table
+	On       []WhereClause // correlation predicates (no binds)
+	Wheres   []WhereClause // closure constraints + nested existence
+	CountOp  string        // "" => plain EXISTS; else ">=", "<", ... => COUNT(*) form
+	CountVal any           // bound value for the COUNT comparison
 }
 
 // CompiledQuery is the dialect-neutral description of a SELECT the builder
@@ -497,6 +528,32 @@ func compileWheres(g Grammar, clauses []WhereClause, n *int) (string, []any) {
 			// Verbatim fragment; carries no binds and consumes no placeholder.
 			sb.WriteString(w.Raw)
 
+		case WhereColumn:
+			// Column-to-column comparison; both sides wrapped, no bind.
+			sb.WriteString(g.Wrap(w.Column))
+			sb.WriteByte(' ')
+			sb.WriteString(w.Op)
+			sb.WriteByte(' ')
+			sb.WriteString(g.Wrap(w.Second))
+
+		case WhereExists:
+			args = append(args, compileExists(g, &sb, w.Exists, n)...)
+
+		case WhereInSub:
+			sub := w.Sub
+			sb.WriteString(g.Wrap(w.Column))
+			sb.WriteString(" IN (SELECT ")
+			sb.WriteString(g.Wrap(sub.Column))
+			sb.WriteString(" FROM ")
+			sb.WriteString(g.Wrap(sub.Table))
+			if len(sub.Wheres) > 0 {
+				clause, subArgs := compileWheres(g, sub.Wheres, n)
+				sb.WriteString(" WHERE ")
+				sb.WriteString(clause)
+				args = append(args, subArgs...)
+			}
+			sb.WriteByte(')')
+
 		case WhereNested:
 			sub, subArgs := compileWheres(g, w.Group, n)
 			sb.WriteByte('(')
@@ -507,6 +564,49 @@ func compileWheres(g Grammar, clauses []WhereClause, n *int) (string, []any) {
 	}
 
 	return sb.String(), args
+}
+
+// compileExists renders a RelationExists into sb, threading the bind counter n
+// through the inner predicates (correlation first, then closure constraints) so
+// placeholders stay contiguous with the outer query. Returns the bound args in
+// emission order. Recurses via compileWheres for nested existence.
+func compileExists(g Grammar, sb *strings.Builder, ex *RelationExists, n *int) []any {
+	inner := make([]WhereClause, 0, len(ex.On)+len(ex.Wheres))
+	inner = append(inner, ex.On...)
+	inner = append(inner, ex.Wheres...)
+
+	if ex.CountOp != "" {
+		sb.WriteString("(SELECT COUNT(*) FROM ")
+		sb.WriteString(g.Wrap(ex.Table))
+		args := writeExistsWhere(g, sb, inner, n)
+		sb.WriteString(") ")
+		sb.WriteString(ex.CountOp)
+		sb.WriteByte(' ')
+		*n++
+		sb.WriteString(g.Placeholder(*n))
+		return append(args, ex.CountVal)
+	}
+
+	if ex.Not {
+		sb.WriteString("NOT ")
+	}
+	sb.WriteString("EXISTS (SELECT 1 FROM ")
+	sb.WriteString(g.Wrap(ex.Table))
+	args := writeExistsWhere(g, sb, inner, n)
+	sb.WriteByte(')')
+	return args
+}
+
+// writeExistsWhere appends " WHERE <clauses>" to sb when clauses is non-empty,
+// threading n, and returns the bound args.
+func writeExistsWhere(g Grammar, sb *strings.Builder, clauses []WhereClause, n *int) []any {
+	if len(clauses) == 0 {
+		return nil
+	}
+	clause, args := compileWheres(g, clauses, n)
+	sb.WriteString(" WHERE ")
+	sb.WriteString(clause)
+	return args
 }
 
 // wrapQualified wraps a possibly dotted identifier (table.column) part by part,

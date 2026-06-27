@@ -9,6 +9,7 @@ package playsql_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 
@@ -59,13 +60,46 @@ func (itProfile) TableName() string { return "it_profiles" }
 
 type itWidget struct {
 	playsql.Model
-	ID    int64  `db:"id" play:"pk,incrementing"`
-	Name  string `db:"name" play:"fillable"`
-	Price int64  `db:"price" play:"fillable"`
-	Cheap bool   `db:"cheap" play:"fillable"`
+	ID    int64    `db:"id" play:"pk,incrementing"`
+	Name  string   `db:"name" play:"fillable"`
+	Price int64    `db:"price" play:"fillable"`
+	Cheap bool     `db:"cheap" play:"fillable"`
+	Tags  []*itTag `play:"belongsToMany,pivot=it_widget_tag"`
 }
 
 func (itWidget) TableName() string { return "it_widgets" }
+
+type itTag struct {
+	ID   int64  `db:"id" play:"pk,incrementing"`
+	Name string `db:"name" play:"fillable"`
+}
+
+func (itTag) TableName() string { return "it_tags" }
+
+// Through chain: it_regions <- it_writers (it_region_id) <- it_articles (it_writer_id).
+type itRegion struct {
+	ID       int64        `db:"id" play:"pk,incrementing"`
+	Name     string       `db:"name" play:"fillable"`
+	Articles []*itArticle `play:"hasManyThrough,through=it_writers"`
+}
+
+func (itRegion) TableName() string { return "it_regions" }
+
+type itWriter struct {
+	ID       int64  `db:"id" play:"pk,incrementing"`
+	RegionID int64  `db:"it_region_id" play:"fillable"`
+	Name     string `db:"name" play:"fillable"`
+}
+
+func (itWriter) TableName() string { return "it_writers" }
+
+type itArticle struct {
+	ID       int64  `db:"id" play:"pk,incrementing"`
+	WriterID int64  `db:"it_writer_id" play:"fillable"`
+	Title    string `db:"title" play:"fillable"`
+}
+
+func (itArticle) TableName() string { return "it_articles" }
 
 func env(key, def string) string {
 	if v := os.Getenv(key); v != "" {
@@ -103,6 +137,16 @@ var ddl = map[string][]string{
 		`CREATE TABLE it_profiles (id BIGSERIAL PRIMARY KEY, name TEXT, prefs JSONB)`,
 		`DROP TABLE IF EXISTS it_widgets`,
 		`CREATE TABLE it_widgets (id BIGSERIAL PRIMARY KEY, name TEXT, price BIGINT, cheap BOOLEAN DEFAULT FALSE)`,
+		`DROP TABLE IF EXISTS it_widget_tag`,
+		`DROP TABLE IF EXISTS it_tags`,
+		`CREATE TABLE it_tags (id BIGSERIAL PRIMARY KEY, name TEXT)`,
+		`CREATE TABLE it_widget_tag (it_widget_id BIGINT, it_tag_id BIGINT)`,
+		`DROP TABLE IF EXISTS it_articles`,
+		`DROP TABLE IF EXISTS it_writers`,
+		`DROP TABLE IF EXISTS it_regions`,
+		`CREATE TABLE it_regions (id BIGSERIAL PRIMARY KEY, name TEXT)`,
+		`CREATE TABLE it_writers (id BIGSERIAL PRIMARY KEY, it_region_id BIGINT, name TEXT)`,
+		`CREATE TABLE it_articles (id BIGSERIAL PRIMARY KEY, it_writer_id BIGINT, title TEXT)`,
 	},
 	"mysql": {
 		`DROP TABLE IF EXISTS it_books`,
@@ -115,6 +159,16 @@ var ddl = map[string][]string{
 		`CREATE TABLE it_profiles (id BIGINT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(191), prefs JSON)`,
 		`DROP TABLE IF EXISTS it_widgets`,
 		`CREATE TABLE it_widgets (id BIGINT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(191), price BIGINT, cheap BOOLEAN DEFAULT 0)`,
+		`DROP TABLE IF EXISTS it_widget_tag`,
+		`DROP TABLE IF EXISTS it_tags`,
+		`CREATE TABLE it_tags (id BIGINT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(191))`,
+		`CREATE TABLE it_widget_tag (it_widget_id BIGINT, it_tag_id BIGINT)`,
+		`DROP TABLE IF EXISTS it_articles`,
+		`DROP TABLE IF EXISTS it_writers`,
+		`DROP TABLE IF EXISTS it_regions`,
+		`CREATE TABLE it_regions (id BIGINT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(191))`,
+		`CREATE TABLE it_writers (id BIGINT AUTO_INCREMENT PRIMARY KEY, it_region_id BIGINT, name VARCHAR(191))`,
+		`CREATE TABLE it_articles (id BIGINT AUTO_INCREMENT PRIMARY KEY, it_writer_id BIGINT, title VARCHAR(191))`,
 	},
 	"mssql": {
 		`DROP TABLE IF EXISTS it_books`,
@@ -127,6 +181,16 @@ var ddl = map[string][]string{
 		`CREATE TABLE it_profiles (id BIGINT IDENTITY(1,1) PRIMARY KEY, name NVARCHAR(191), prefs NVARCHAR(MAX))`,
 		`DROP TABLE IF EXISTS it_widgets`,
 		`CREATE TABLE it_widgets (id BIGINT IDENTITY(1,1) PRIMARY KEY, name NVARCHAR(191), price BIGINT, cheap BIT DEFAULT 0)`,
+		`DROP TABLE IF EXISTS it_widget_tag`,
+		`DROP TABLE IF EXISTS it_tags`,
+		`CREATE TABLE it_tags (id BIGINT IDENTITY(1,1) PRIMARY KEY, name NVARCHAR(191))`,
+		`CREATE TABLE it_widget_tag (it_widget_id BIGINT, it_tag_id BIGINT)`,
+		`DROP TABLE IF EXISTS it_articles`,
+		`DROP TABLE IF EXISTS it_writers`,
+		`DROP TABLE IF EXISTS it_regions`,
+		`CREATE TABLE it_regions (id BIGINT IDENTITY(1,1) PRIMARY KEY, name NVARCHAR(191))`,
+		`CREATE TABLE it_writers (id BIGINT IDENTITY(1,1) PRIMARY KEY, it_region_id BIGINT, name NVARCHAR(191))`,
+		`CREATE TABLE it_articles (id BIGINT IDENTITY(1,1) PRIMARY KEY, it_writer_id BIGINT, title NVARCHAR(191))`,
 	},
 }
 
@@ -148,7 +212,159 @@ func TestIntegration(t *testing.T) {
 			}
 			runSuite(t, db)
 			runRawReturningSuite(t, db, drv.dialect)
+			runExistenceSuite(t, db)
 		})
+	}
+}
+
+// runExistenceSuite exercises Has/DoesntHave/WhereHas/HasCount (correlated
+// EXISTS) against a live database. It builds on runSuite's state: author "A"
+// with two books, and no other author has books.
+func runExistenceSuite(t *testing.T, db *playsql.DB) {
+	ctx := context.Background()
+
+	if err := db.Insert(ctx, &itAuthor{Name: "Childless"}); err != nil {
+		t.Fatalf("insert childless author: %v", err)
+	}
+
+	withBooks, err := playsql.Query[itAuthor](db).Has("Books").Get(ctx)
+	if err != nil {
+		t.Fatalf("has books: %v", err)
+	}
+	if len(withBooks) != 1 || withBooks[0].Name != "A" {
+		t.Fatalf("Has(Books) wrong: %+v", withBooks)
+	}
+
+	none, err := playsql.Query[itAuthor](db).DoesntHave("Books").Get(ctx)
+	if err != nil {
+		t.Fatalf("doesnthave books: %v", err)
+	}
+	if len(none) != 1 || none[0].Name != "Childless" {
+		t.Fatalf("DoesntHave(Books) wrong: %+v", none)
+	}
+
+	two, err := playsql.Query[itAuthor](db).HasCount("Books", ">=", 2).Get(ctx)
+	if err != nil {
+		t.Fatalf("hascount books: %v", err)
+	}
+	if len(two) != 1 || two[0].Name != "A" {
+		t.Fatalf("HasCount(Books,>=,2) wrong: %+v", two)
+	}
+
+	whereHas, err := playsql.Query[itAuthor](db).
+		WhereHas("Books", func(q *playsql.Builder) { q.Where("title", "like", "b%") }).
+		Get(ctx)
+	if err != nil {
+		t.Fatalf("wherehas books: %v", err)
+	}
+	if len(whereHas) != 1 || whereHas[0].Name != "A" {
+		t.Fatalf("WhereHas(Books) wrong: %+v", whereHas)
+	}
+
+	// belongsToMany existence: tag exactly one widget, via the it_widget_tag pivot.
+	if err := db.Insert(ctx, &itTag{Name: "featured"}); err != nil {
+		t.Fatalf("insert tag: %v", err)
+	}
+	var wa itWidget
+	if err := db.Model(&itWidget{}).WhereEq("name", "a").First(ctx, &wa); err != nil {
+		t.Fatalf("find widget a: %v", err)
+	}
+	var tag itTag
+	if err := db.Model(&itTag{}).WhereEq("name", "featured").First(ctx, &tag); err != nil {
+		t.Fatalf("find tag: %v", err)
+	}
+	// ids are trusted integers — inline to stay dialect-placeholder-agnostic.
+	if _, err := db.Exec(ctx, fmt.Sprintf(
+		"INSERT INTO it_widget_tag (it_widget_id, it_tag_id) VALUES (%d, %d)", wa.ID, tag.ID)); err != nil {
+		t.Fatalf("link pivot: %v", err)
+	}
+
+	tagged, err := playsql.Query[itWidget](db).Has("Tags").Get(ctx)
+	if err != nil {
+		t.Fatalf("has tags: %v", err)
+	}
+	if len(tagged) != 1 || tagged[0].Name != "a" {
+		t.Fatalf("Has(Tags) wrong: %+v", tagged)
+	}
+
+	untagged, err := playsql.Query[itWidget](db).DoesntHave("Tags").Get(ctx)
+	if err != nil {
+		t.Fatalf("doesnthave tags: %v", err)
+	}
+	if len(untagged) != 2 {
+		t.Fatalf("DoesntHave(Tags) want 2, got %d", len(untagged))
+	}
+
+	whereHasTag, err := playsql.Query[itWidget](db).
+		WhereHas("Tags", func(q *playsql.Builder) { q.WhereEq("name", "featured") }).
+		Get(ctx)
+	if err != nil {
+		t.Fatalf("wherehas tags: %v", err)
+	}
+	if len(whereHasTag) != 1 || whereHasTag[0].Name != "a" {
+		t.Fatalf("WhereHas(Tags) wrong: %+v", whereHasTag)
+	}
+
+	// has*Through existence: North has 3 articles (writers A+B), South 1 (C),
+	// East none.
+	north := &itRegion{Name: "North"}
+	south := &itRegion{Name: "South"}
+	east := &itRegion{Name: "East"}
+	for _, r := range []*itRegion{north, south, east} {
+		if err := db.Insert(ctx, r); err != nil {
+			t.Fatalf("insert region: %v", err)
+		}
+	}
+	wA := &itWriter{RegionID: north.ID, Name: "A"}
+	wB := &itWriter{RegionID: north.ID, Name: "B"}
+	wC := &itWriter{RegionID: south.ID, Name: "C"}
+	for _, w := range []*itWriter{wA, wB, wC} {
+		if err := db.Insert(ctx, w); err != nil {
+			t.Fatalf("insert writer: %v", err)
+		}
+	}
+	for _, a := range []*itArticle{
+		{WriterID: wA.ID, Title: "a1"}, {WriterID: wA.ID, Title: "a2"},
+		{WriterID: wB.ID, Title: "b1"}, {WriterID: wC.ID, Title: "c1"},
+	} {
+		if err := db.Insert(ctx, a); err != nil {
+			t.Fatalf("insert article: %v", err)
+		}
+	}
+
+	hasArticles, err := playsql.Query[itRegion](db).Has("Articles").Get(ctx)
+	if err != nil {
+		t.Fatalf("has articles: %v", err)
+	}
+	if len(hasArticles) != 2 {
+		t.Fatalf("Has(Articles) want 2 (North,South), got %d", len(hasArticles))
+	}
+
+	noArticles, err := playsql.Query[itRegion](db).DoesntHave("Articles").Get(ctx)
+	if err != nil {
+		t.Fatalf("doesnthave articles: %v", err)
+	}
+	if len(noArticles) != 1 || noArticles[0].Name != "East" {
+		t.Fatalf("DoesntHave(Articles) wrong: %+v", noArticles)
+	}
+
+	// Exact far-row count: only North has >= 3 articles (2 writers notwithstanding).
+	three, err := playsql.Query[itRegion](db).HasCount("Articles", ">=", 3).Get(ctx)
+	if err != nil {
+		t.Fatalf("hascount articles: %v", err)
+	}
+	if len(three) != 1 || three[0].Name != "North" {
+		t.Fatalf("HasCount(Articles,>=,3) wrong: %+v", three)
+	}
+
+	whereHasArticle, err := playsql.Query[itRegion](db).
+		WhereHas("Articles", func(q *playsql.Builder) { q.Where("title", "like", "a%") }).
+		Get(ctx)
+	if err != nil {
+		t.Fatalf("wherehas articles: %v", err)
+	}
+	if len(whereHasArticle) != 1 || whereHasArticle[0].Name != "North" {
+		t.Fatalf("WhereHas(Articles like a%%) wrong: %+v", whereHasArticle)
 	}
 }
 

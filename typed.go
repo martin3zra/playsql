@@ -79,6 +79,68 @@ func (t *TypedBuilder[T]) WhereRaw(sql string) *TypedBuilder[T] {
 	return t
 }
 
+// --- relationship existence (mirrors *Builder) ---
+
+func (t *TypedBuilder[T]) Has(relation string) *TypedBuilder[T] {
+	t.b.Has(relation)
+	return t
+}
+
+func (t *TypedBuilder[T]) OrHas(relation string) *TypedBuilder[T] {
+	t.b.OrHas(relation)
+	return t
+}
+
+func (t *TypedBuilder[T]) HasCount(relation, op string, count int) *TypedBuilder[T] {
+	t.b.HasCount(relation, op, count)
+	return t
+}
+
+func (t *TypedBuilder[T]) DoesntHave(relation string) *TypedBuilder[T] {
+	t.b.DoesntHave(relation)
+	return t
+}
+
+func (t *TypedBuilder[T]) OrDoesntHave(relation string) *TypedBuilder[T] {
+	t.b.OrDoesntHave(relation)
+	return t
+}
+
+func (t *TypedBuilder[T]) WhereHas(relation string, fn func(*Builder)) *TypedBuilder[T] {
+	t.b.WhereHas(relation, fn)
+	return t
+}
+
+func (t *TypedBuilder[T]) OrWhereHas(relation string, fn func(*Builder)) *TypedBuilder[T] {
+	t.b.OrWhereHas(relation, fn)
+	return t
+}
+
+func (t *TypedBuilder[T]) WhereHasCount(relation string, fn func(*Builder), op string, count int) *TypedBuilder[T] {
+	t.b.WhereHasCount(relation, fn, op, count)
+	return t
+}
+
+func (t *TypedBuilder[T]) WhereDoesntHave(relation string, fn func(*Builder)) *TypedBuilder[T] {
+	t.b.WhereDoesntHave(relation, fn)
+	return t
+}
+
+func (t *TypedBuilder[T]) OrWhereDoesntHave(relation string, fn func(*Builder)) *TypedBuilder[T] {
+	t.b.OrWhereDoesntHave(relation, fn)
+	return t
+}
+
+func (t *TypedBuilder[T]) WhereRelation(relation, column, op string, value any) *TypedBuilder[T] {
+	t.b.WhereRelation(relation, column, op, value)
+	return t
+}
+
+func (t *TypedBuilder[T]) OrWhereRelation(relation, column, op string, value any) *TypedBuilder[T] {
+	t.b.OrWhereRelation(relation, column, op, value)
+	return t
+}
+
 func (t *TypedBuilder[T]) WhereIn(column string, values ...any) *TypedBuilder[T] {
 	t.b.WhereIn(column, values...)
 	return t

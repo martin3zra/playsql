@@ -82,3 +82,96 @@ func TestHasOneThrough(t *testing.T) {
 		t.Fatalf("South lead should be c1, got %+v", regions[1].Lead)
 	}
 }
+
+// --- has*Through existence ---
+
+func regionNames(r []Region) map[string]bool {
+	m := map[string]bool{}
+	for _, x := range r {
+		m[x.Name] = true
+	}
+	return m
+}
+
+func TestHas_Through(t *testing.T) {
+	db := setupThrough(t)
+	ctx := context.Background()
+	// A region with no writers (hence no articles).
+	if _, err := db.Exec(ctx, `INSERT INTO regions (id, name) VALUES (3,'East')`); err != nil {
+		t.Fatalf("insert region: %v", err)
+	}
+
+	got, err := playsql.Query[Region](db).Has("Articles").Get(ctx)
+	if err != nil {
+		t.Fatalf("has: %v", err)
+	}
+	names := regionNames(got)
+	if len(names) != 2 || !names["North"] || !names["South"] {
+		t.Fatalf("Has(Articles) = %v, want North+South", names)
+	}
+}
+
+func TestDoesntHave_Through(t *testing.T) {
+	db := setupThrough(t)
+	ctx := context.Background()
+	if _, err := db.Exec(ctx, `INSERT INTO regions (id, name) VALUES (3,'East')`); err != nil {
+		t.Fatalf("insert region: %v", err)
+	}
+
+	got, err := playsql.Query[Region](db).DoesntHave("Articles").Get(ctx)
+	if err != nil {
+		t.Fatalf("doesnthave: %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "East" {
+		t.Fatalf("DoesntHave(Articles) = %v, want [East]", regionNames(got))
+	}
+}
+
+func TestWhereHas_Through(t *testing.T) {
+	db := setupThrough(t)
+	// Regions having an article titled like "a%": only North (a1,a2).
+	got, err := playsql.Query[Region](db).
+		WhereHas("Articles", func(q *playsql.Builder) { q.Where("title", "like", "a%") }).
+		Get(context.Background())
+	if err != nil {
+		t.Fatalf("wherehas: %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "North" {
+		t.Fatalf("WhereHas(Articles like a%%) = %v, want [North]", regionNames(got))
+	}
+}
+
+func TestHasCount_Through_ExactFarCount(t *testing.T) {
+	db := setupThrough(t)
+	// North: 3 articles (writers 1+2). South: 1 (writer 3).
+	// >= 3 must count FAR rows, not intermediate writers (North has 2 writers),
+	// so only North qualifies.
+	got, err := playsql.Query[Region](db).HasCount("Articles", ">=", 3).Get(context.Background())
+	if err != nil {
+		t.Fatalf("hascount: %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "North" {
+		t.Fatalf("HasCount(Articles,>=,3) = %v, want [North]", regionNames(got))
+	}
+
+	// >= 1 includes both.
+	atLeastOne, err := playsql.Query[Region](db).HasCount("Articles", ">=", 1).Get(context.Background())
+	if err != nil {
+		t.Fatalf("hascount >=1: %v", err)
+	}
+	if len(atLeastOne) != 2 {
+		t.Fatalf("HasCount(Articles,>=,1) want 2, got %d", len(atLeastOne))
+	}
+}
+
+func TestHas_OneThrough(t *testing.T) {
+	db := setupThrough(t)
+	// hasOneThrough behaves identically for existence.
+	got, err := playsql.Query[Region](db).Has("Lead").Get(context.Background())
+	if err != nil {
+		t.Fatalf("has lead: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("Has(Lead) want 2, got %d", len(got))
+	}
+}

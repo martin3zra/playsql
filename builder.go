@@ -2,6 +2,7 @@ package playsql
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"strings"
 	"time"
@@ -98,6 +99,292 @@ func (b *Builder) WhereRaw(sql string) *Builder {
 // OrWhereRaw is WhereRaw joined with OR.
 func (b *Builder) OrWhereRaw(sql string) *Builder {
 	return b.add(grammar.WhereClause{Kind: grammar.WhereRaw, Boolean: "OR", Raw: sql})
+}
+
+// --- relationship existence (correlated EXISTS subqueries) ---
+//
+// Has/DoesntHave filter the parent by whether a related row exists; WhereHas adds
+// closure constraints to that related query. Relations are looked up by field
+// name and may be dotted for nesting ("comments.images"). Phase 1 supports
+// hasMany, hasOne, and belongsTo; other kinds return an error at the terminal op.
+
+// Has keeps rows that have at least one related record (EXISTS).
+func (b *Builder) Has(relation string) *Builder {
+	return b.addExists(relation, "AND", false, "", 0, nil)
+}
+
+// OrHas is Has joined with OR.
+func (b *Builder) OrHas(relation string) *Builder {
+	return b.addExists(relation, "OR", false, "", 0, nil)
+}
+
+// HasCount keeps rows whose related count satisfies op/count, e.g.
+// HasCount("comments", ">=", 3). Not supported on nested (dotted) relations.
+func (b *Builder) HasCount(relation, op string, count int) *Builder {
+	return b.addExists(relation, "AND", false, op, count, nil)
+}
+
+// DoesntHave keeps rows with no matching related record (NOT EXISTS).
+func (b *Builder) DoesntHave(relation string) *Builder {
+	return b.addExists(relation, "AND", true, "", 0, nil)
+}
+
+// OrDoesntHave is DoesntHave joined with OR.
+func (b *Builder) OrDoesntHave(relation string) *Builder {
+	return b.addExists(relation, "OR", true, "", 0, nil)
+}
+
+// WhereHas keeps rows that have a related record matching the closure.
+func (b *Builder) WhereHas(relation string, fn func(*Builder)) *Builder {
+	return b.addExists(relation, "AND", false, "", 0, fn)
+}
+
+// OrWhereHas is WhereHas joined with OR.
+func (b *Builder) OrWhereHas(relation string, fn func(*Builder)) *Builder {
+	return b.addExists(relation, "OR", false, "", 0, fn)
+}
+
+// WhereHasCount combines WhereHas with a count comparison. Not supported on
+// nested (dotted) relations.
+func (b *Builder) WhereHasCount(relation string, fn func(*Builder), op string, count int) *Builder {
+	return b.addExists(relation, "AND", false, op, count, fn)
+}
+
+// WhereDoesntHave keeps rows with no related record matching the closure.
+func (b *Builder) WhereDoesntHave(relation string, fn func(*Builder)) *Builder {
+	return b.addExists(relation, "AND", true, "", 0, fn)
+}
+
+// OrWhereDoesntHave is WhereDoesntHave joined with OR.
+func (b *Builder) OrWhereDoesntHave(relation string, fn func(*Builder)) *Builder {
+	return b.addExists(relation, "OR", true, "", 0, fn)
+}
+
+// WhereRelation is shorthand for WhereHas with a single equality/comparison on
+// the related model: WhereRelation("comments", "approved", "=", false).
+func (b *Builder) WhereRelation(relation, column, op string, value any) *Builder {
+	return b.WhereHas(relation, func(q *Builder) { q.Where(column, op, value) })
+}
+
+// OrWhereRelation is WhereRelation joined with OR.
+func (b *Builder) OrWhereRelation(relation, column, op string, value any) *Builder {
+	return b.OrWhereHas(relation, func(q *Builder) { q.Where(column, op, value) })
+}
+
+// addExists builds the EXISTS clause for a (possibly dotted) relation path and
+// appends it. not/op apply to the outermost level; the closure applies to the
+// innermost. The count form is rejected on nested paths (ambiguous semantics).
+func (b *Builder) addExists(relation, boolean string, not bool, op string, count int, fn func(*Builder)) *Builder {
+	segments := strings.Split(relation, ".")
+	if op != "" && len(segments) > 1 {
+		return b.fail(fmt.Errorf("playsql: count form not supported on nested relation %q", relation))
+	}
+
+	// The count form for has*Through counts far rows exactly via an IN-subquery,
+	// not the nested-EXISTS structure used for existence. (Single segment is
+	// guaranteed here by the check above.)
+	if op != "" {
+		if rel, ok := b.meta.Relations[segments[0]]; ok &&
+			(rel.Kind == metadata.HasManyThrough || rel.Kind == metadata.HasOneThrough) {
+			ex, err := b.throughCountExists(b.meta, rel, op, count, fn)
+			if err != nil {
+				return b.fail(err)
+			}
+			return b.add(grammar.WhereClause{Kind: grammar.WhereExists, Boolean: boolean, Exists: ex})
+		}
+	}
+
+	ex, err := b.relationExists(b.meta, segments, fn)
+	if err != nil {
+		return b.fail(err)
+	}
+	ex.Not = not
+	if op != "" {
+		ex.CountOp = op
+		ex.CountVal = count
+		ex.Not = false // the operator encodes presence/absence
+	}
+	return b.add(grammar.WhereClause{Kind: grammar.WhereExists, Boolean: boolean, Exists: ex})
+}
+
+// relationExists builds a (possibly nested) correlated EXISTS for segments[0...]
+// against parentMeta. fn (when non-nil) constrains the innermost related query.
+// The related model's soft-delete filter is applied by default.
+func (b *Builder) relationExists(parentMeta *metadata.ModelMeta, segments []string, fn func(*Builder)) (*grammar.RelationExists, error) {
+	name := segments[0]
+	rel, ok := parentMeta.Relations[name]
+	if !ok {
+		return nil, fmt.Errorf("playsql: unknown relation %q on %s", name, parentMeta.StructName)
+	}
+	relatedMeta := metadata.For(reflect.New(rel.RelatedType).Interface())
+
+	// outer is the clause to return/decorate; related is the level whose table is
+	// the related model — where the closure and any nested segment attach. They
+	// differ for belongsToMany (the outer wraps the pivot).
+	outer, related, err := buildExistsForKind(parentMeta, rel, relatedMeta)
+	if err != nil {
+		return nil, err
+	}
+
+	// Exclude soft-deleted related rows by default (matching default queries).
+	if relatedMeta.SoftDeletes {
+		related.Wheres = append(related.Wheres, grammar.WhereClause{
+			Kind:    grammar.WhereNull,
+			Boolean: "AND",
+			Column:  relatedMeta.Table + "." + relatedMeta.DeletedAtColumn,
+		})
+	}
+
+	if len(segments) == 1 {
+		if fn != nil {
+			sub := &Builder{sess: b.sess, meta: relatedMeta}
+			fn(sub)
+			if sub.err != nil {
+				return nil, sub.err
+			}
+			related.Wheres = append(related.Wheres, sub.wheres...)
+		}
+		return outer, nil
+	}
+
+	nested, err := b.relationExists(relatedMeta, segments[1:], fn)
+	if err != nil {
+		return nil, err
+	}
+	related.Wheres = append(related.Wheres, grammar.WhereClause{
+		Kind: grammar.WhereExists, Boolean: "AND", Exists: nested,
+	})
+	return outer, nil
+}
+
+// buildExistsForKind constructs the EXISTS clause(s) tying a related subquery to
+// its parent, per relation kind. It returns the outermost clause and the level
+// whose table is the related model (the attach point for closures/nesting); for
+// most kinds these are the same clause, but belongsToMany wraps the related
+// EXISTS in an outer EXISTS over the pivot table. Supported: hasMany, hasOne,
+// belongsTo, belongsToMany.
+func buildExistsForKind(parentMeta *metadata.ModelMeta, rel metadata.RelationMeta, relatedMeta *metadata.ModelMeta) (outer, related *grammar.RelationExists, err error) {
+	switch rel.Kind {
+	case metadata.HasMany, metadata.HasOne:
+		foreignKey, otherKey := metadata.ResolveRelationKeys(parentMeta, rel, relatedMeta)
+		// related.foreignKey = parent.localKey
+		ex := &grammar.RelationExists{Table: relatedMeta.Table, On: []grammar.WhereClause{{
+			Kind:   grammar.WhereColumn,
+			Column: relatedMeta.Table + "." + foreignKey,
+			Op:     "=",
+			Second: parentMeta.Table + "." + otherKey,
+		}}}
+		return ex, ex, nil
+
+	case metadata.BelongsTo:
+		foreignKey, otherKey := metadata.ResolveRelationKeys(parentMeta, rel, relatedMeta)
+		// parent.foreignKey = related.ownerKey
+		ex := &grammar.RelationExists{Table: relatedMeta.Table, On: []grammar.WhereClause{{
+			Kind:   grammar.WhereColumn,
+			Column: parentMeta.Table + "." + foreignKey,
+			Op:     "=",
+			Second: relatedMeta.Table + "." + otherKey,
+		}}}
+		return ex, ex, nil
+
+	case metadata.BelongsToMany:
+		pivotTable, fpk, rpk, parentKey, relatedKey := metadata.ResolvePivot(parentMeta, rel, relatedMeta)
+		// inner: related.relatedKey = pivot.relatedPivotKey
+		inner := &grammar.RelationExists{Table: relatedMeta.Table, On: []grammar.WhereClause{{
+			Kind:   grammar.WhereColumn,
+			Column: relatedMeta.Table + "." + relatedKey,
+			Op:     "=",
+			Second: pivotTable + "." + rpk,
+		}}}
+		// outer: pivot.foreignPivotKey = parent.parentKey, wrapping the inner EXISTS.
+		out := &grammar.RelationExists{
+			Table: pivotTable,
+			On: []grammar.WhereClause{{
+				Kind:   grammar.WhereColumn,
+				Column: pivotTable + "." + fpk,
+				Op:     "=",
+				Second: parentMeta.Table + "." + parentKey,
+			}},
+			Wheres: []grammar.WhereClause{{Kind: grammar.WhereExists, Boolean: "AND", Exists: inner}},
+		}
+		return out, inner, nil
+
+	case metadata.HasManyThrough, metadata.HasOneThrough:
+		if rel.ThroughTable == "" {
+			return nil, nil, fmt.Errorf("playsql: relation %q: %s requires a through= table", rel.Name, rel.Kind)
+		}
+		throughTable, firstKey, secondKey, throughKey, localKey := metadata.ResolveThrough(parentMeta, rel)
+		// inner: far.secondKey = through.throughKey
+		inner := &grammar.RelationExists{Table: relatedMeta.Table, On: []grammar.WhereClause{{
+			Kind:   grammar.WhereColumn,
+			Column: relatedMeta.Table + "." + secondKey,
+			Op:     "=",
+			Second: throughTable + "." + throughKey,
+		}}}
+		// outer: through.firstKey = parent.localKey, wrapping the inner EXISTS.
+		out := &grammar.RelationExists{
+			Table: throughTable,
+			On: []grammar.WhereClause{{
+				Kind:   grammar.WhereColumn,
+				Column: throughTable + "." + firstKey,
+				Op:     "=",
+				Second: parentMeta.Table + "." + localKey,
+			}},
+			Wheres: []grammar.WhereClause{{Kind: grammar.WhereExists, Boolean: "AND", Exists: inner}},
+		}
+		return out, inner, nil
+
+	default:
+		return nil, nil, fmt.Errorf("playsql: relation existence not supported for %s relations", rel.Kind)
+	}
+}
+
+// throughCountExists builds the COUNT form for has*Through, which counts the far
+// rows exactly (a nested EXISTS would count intermediate rows). It emits
+// (SELECT COUNT(*) FROM far WHERE far.secondKey IN (SELECT through.throughKey
+// FROM through WHERE through.firstKey = parent.localKey) [AND closure]) op ?.
+func (b *Builder) throughCountExists(parentMeta *metadata.ModelMeta, rel metadata.RelationMeta, op string, count int, fn func(*Builder)) (*grammar.RelationExists, error) {
+	if rel.ThroughTable == "" {
+		return nil, fmt.Errorf("playsql: relation %q: %s requires a through= table", rel.Name, rel.Kind)
+	}
+	farMeta := metadata.For(reflect.New(rel.RelatedType).Interface())
+	throughTable, firstKey, secondKey, throughKey, localKey := metadata.ResolveThrough(parentMeta, rel)
+
+	ex := &grammar.RelationExists{
+		Table: farMeta.Table,
+		On: []grammar.WhereClause{{
+			Kind:   grammar.WhereInSub,
+			Column: farMeta.Table + "." + secondKey,
+			Sub: &grammar.Subselect{
+				Column: throughTable + "." + throughKey,
+				Table:  throughTable,
+				Wheres: []grammar.WhereClause{{
+					Kind:   grammar.WhereColumn,
+					Column: throughTable + "." + firstKey,
+					Op:     "=",
+					Second: parentMeta.Table + "." + localKey,
+				}},
+			},
+		}},
+		CountOp:  op,
+		CountVal: count,
+	}
+	if farMeta.SoftDeletes {
+		ex.Wheres = append(ex.Wheres, grammar.WhereClause{
+			Kind:    grammar.WhereNull,
+			Boolean: "AND",
+			Column:  farMeta.Table + "." + farMeta.DeletedAtColumn,
+		})
+	}
+	if fn != nil {
+		sub := &Builder{sess: b.sess, meta: farMeta}
+		fn(sub)
+		if sub.err != nil {
+			return nil, sub.err
+		}
+		ex.Wheres = append(ex.Wheres, sub.wheres...)
+	}
+	return ex, nil
 }
 
 // WhereIn matches column against a set. Pass values variadically or as a single
@@ -516,6 +803,17 @@ func whereArgs(wheres []grammar.WhereClause) []any {
 			args = append(args, w.Values...)
 		case grammar.WhereNested:
 			args = append(args, whereArgs(w.Group)...)
+		case grammar.WhereExists:
+			// Order mirrors compileExists: correlation (no binds), inner wheres,
+			// then the COUNT comparison value when present.
+			ex := w.Exists
+			args = append(args, whereArgs(ex.On)...)
+			args = append(args, whereArgs(ex.Wheres)...)
+			if ex.CountOp != "" {
+				args = append(args, ex.CountVal)
+			}
+		case grammar.WhereInSub:
+			args = append(args, whereArgs(w.Sub.Wheres)...)
 		}
 	}
 	return args
