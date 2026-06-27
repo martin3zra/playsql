@@ -78,10 +78,18 @@ type CompiledQuery struct {
 	Columns    []string          // empty => SELECT *
 	Aggregate  string            // e.g. "COUNT(*)"; overrides Columns, emitted verbatim
 	Aggregates []AggregateSelect // extra correlated-subquery columns (withCount/withSum/…)
+	SubSelects []SubSelectColumn // arbitrary correlated subquery columns (AddSelect)
 	Wheres     []WhereClause
 	Orders     []OrderClause
 	Limit      int // 0 => no LIMIT
 	Offset     int // 0 => no OFFSET
+}
+
+// SubSelectColumn is an arbitrary correlated subquery emitted as "(<Query>) AS
+// Alias" in the select list (the addSelect feature).
+type SubSelectColumn struct {
+	Query CompiledQuery
+	Alias string
 }
 
 // AggregateSelect is a correlated scalar subquery emitted as an extra select
@@ -99,10 +107,12 @@ type AggregateSelect struct {
 	Alias  string
 }
 
-// OrderClause is one ORDER BY term. Direction is "ASC" or "DESC".
+// OrderClause is one ORDER BY term. Direction is "ASC" or "DESC". When Sub is
+// set the term is a correlated subquery — "ORDER BY (<Sub>) <Direction>".
 type OrderClause struct {
 	Column    string
 	Direction string
+	Sub       *CompiledQuery
 }
 
 // DeleteStmt describes a DELETE.
@@ -187,32 +197,42 @@ func For(driver string) Grammar {
 	}
 }
 
-// selectCore builds everything up to (and including) ORDER BY, leaving the
-// dialect-specific row-limiting clause to the caller. hasOrder reports whether
-// an ORDER BY was emitted.
-func selectCore(g Grammar, q CompiledQuery) (sql string, args []any, hasOrder bool) {
-	var sb strings.Builder
+// selectBody writes SELECT … FROM … WHERE … ORDER BY (no row limit) into sb,
+// threading the external bind counter n so nested subqueries (aggregate columns,
+// AddSelect subqueries, and ORDER BY subqueries) number their placeholders
+// contiguously with the parent. hasOrder reports whether an ORDER BY was emitted.
+func selectBody(g Grammar, sb *strings.Builder, q CompiledQuery, n *int) (args []any, hasOrder bool) {
 	sb.WriteString("SELECT ")
 
-	// n threads contiguously across aggregate subquery columns (which may carry
-	// binds from constraint closures) and then the WHERE clause.
-	n := 0
 	if q.Aggregate != "" {
 		sb.WriteString(q.Aggregate) // verbatim, e.g. COUNT(*)
 	} else {
+		first := true
+		comma := func() {
+			if !first {
+				sb.WriteString(", ")
+			}
+			first = false
+		}
 		if len(q.Columns) > 0 {
-			for i, c := range q.Columns {
-				if i > 0 {
-					sb.WriteString(", ")
-				}
+			for _, c := range q.Columns {
+				comma()
 				sb.WriteString(g.Wrap(c))
 			}
 		} else {
+			comma()
 			sb.WriteByte('*')
 		}
 		for _, a := range q.Aggregates {
-			sb.WriteString(", ")
-			args = append(args, compileAggregate(g, &sb, a, &n)...)
+			comma()
+			args = append(args, compileAggregate(g, sb, a, n)...)
+		}
+		for _, ss := range q.SubSelects {
+			comma()
+			sb.WriteByte('(')
+			args = append(args, writeNestedSelect(g, sb, ss.Query, n)...)
+			sb.WriteString(") AS ")
+			sb.WriteString(g.Wrap(ss.Alias))
 		}
 	}
 
@@ -220,7 +240,7 @@ func selectCore(g Grammar, q CompiledQuery) (sql string, args []any, hasOrder bo
 	sb.WriteString(g.Wrap(q.Table))
 
 	if len(q.Wheres) > 0 {
-		clause, wargs := compileWheres(g, q.Wheres, &n)
+		clause, wargs := compileWheres(g, q.Wheres, n)
 		sb.WriteString(" WHERE ")
 		sb.WriteString(clause)
 		args = append(args, wargs...)
@@ -232,43 +252,69 @@ func selectCore(g Grammar, q CompiledQuery) (sql string, args []any, hasOrder bo
 			if i > 0 {
 				sb.WriteString(", ")
 			}
-			sb.WriteString(g.Wrap(o.Column))
+			if o.Sub != nil {
+				sb.WriteByte('(')
+				args = append(args, writeNestedSelect(g, sb, *o.Sub, n)...)
+				sb.WriteByte(')')
+			} else {
+				sb.WriteString(g.Wrap(o.Column))
+			}
 			sb.WriteByte(' ')
 			sb.WriteString(o.Direction)
 		}
 		hasOrder = true
 	}
 
-	return sb.String(), args, hasOrder
+	return args, hasOrder
 }
 
-// compileSelect is the LIMIT/OFFSET assembler shared by SQLite/Postgres/MySQL.
-func compileSelect(g Grammar, q CompiledQuery) (string, []any) {
-	sql, args, _ := selectCore(g, q)
+// writeNestedSelect writes a complete inner SELECT (body + dialect row limit)
+// into sb, sharing the parent's bind counter.
+func writeNestedSelect(g Grammar, sb *strings.Builder, q CompiledQuery, n *int) []any {
+	args, hasOrder := selectBody(g, sb, q, n)
+	writeLimit(g, sb, q, hasOrder)
+	return args
+}
+
+// writeLimit appends the dialect row-limiting clause (literal, no binds). SQL
+// Server uses OFFSET/FETCH (requiring an ORDER BY — a stable fallback is added);
+// the others use LIMIT/OFFSET.
+func writeLimit(g Grammar, sb *strings.Builder, q CompiledQuery, hasOrder bool) {
+	if _, ok := g.(MSSQL); ok {
+		if q.Limit <= 0 && q.Offset <= 0 {
+			return
+		}
+		if !hasOrder {
+			sb.WriteString(" ORDER BY (SELECT NULL)")
+		}
+		fmt.Fprintf(sb, " OFFSET %d ROWS", q.Offset)
+		if q.Limit > 0 {
+			fmt.Fprintf(sb, " FETCH NEXT %d ROWS ONLY", q.Limit)
+		}
+		return
+	}
 	if q.Limit > 0 {
-		sql += fmt.Sprintf(" LIMIT %d", q.Limit)
+		fmt.Fprintf(sb, " LIMIT %d", q.Limit)
 	}
 	if q.Offset > 0 {
-		sql += fmt.Sprintf(" OFFSET %d", q.Offset)
+		fmt.Fprintf(sb, " OFFSET %d", q.Offset)
 	}
-	return sql, args
 }
 
-// compileSelectOffsetFetch is the SQL Server form: OFFSET n ROWS FETCH NEXT m
-// ROWS ONLY, which requires an ORDER BY (a stable fallback is added when none).
+// compileSelect assembles a full SELECT with the dialect row limit, threading a
+// fresh bind counter through the (possibly nested) query.
+func compileSelect(g Grammar, q CompiledQuery) (string, []any) {
+	var sb strings.Builder
+	n := 0
+	args, hasOrder := selectBody(g, &sb, q, &n)
+	writeLimit(g, &sb, q, hasOrder)
+	return sb.String(), args
+}
+
+// compileSelectOffsetFetch is retained for the SQL Server entry point; writeLimit
+// already emits the OFFSET/FETCH form for that dialect.
 func compileSelectOffsetFetch(g Grammar, q CompiledQuery) (string, []any) {
-	sql, args, hasOrder := selectCore(g, q)
-	if q.Limit <= 0 && q.Offset <= 0 {
-		return sql, args
-	}
-	if !hasOrder {
-		sql += " ORDER BY (SELECT NULL)"
-	}
-	sql += fmt.Sprintf(" OFFSET %d ROWS", q.Offset)
-	if q.Limit > 0 {
-		sql += fmt.Sprintf(" FETCH NEXT %d ROWS ONLY", q.Limit)
-	}
-	return sql, args
+	return compileSelect(g, q)
 }
 
 // jsonPath turns a dotted path ("a.b") into a SQL/JSON path ("$.a.b"). An empty

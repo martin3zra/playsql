@@ -369,6 +369,35 @@ db.LoadCount(ctx, &posts, "comments", playsql.As("approved_count"),
 Deferred loading covers `hasMany`, `hasOne`, and `belongsTo`; for
 `belongsToMany`/`has*Through` use the query-time `With*` methods.
 
+### Subquery selects and ordering
+
+Pull a scalar from another table as a column (`AddSelect`) or sort by one
+(`OrderBySubquery`), in a single query. The subquery is an ordinary builder for
+the other table, correlated with `WhereColumn` (compare two columns; a dotted
+name references the outer table):
+
+```go
+sub := db.Model(&Flight{}).Select("name").
+    WhereColumn("destination_id", "=", "destinations.id").
+    OrderBy("arrived_at", playsql.Desc).Limit(1)
+
+// add the most-recent flight name as a column
+playsql.Query[Destination](db).AddSelect("last_flight", sub).Get(ctx)
+
+// sort destinations by their latest flight arrival
+playsql.Query[Destination](db).
+    OrderBySubquery(
+        db.Model(&Flight{}).Select("arrived_at").
+            WhereColumn("destination_id", "=", "destinations.id").
+            OrderBy("arrived_at", playsql.Desc).Limit(1),
+        playsql.Desc).
+    Get(ctx)
+```
+
+The `AddSelect` value scans into a matching `db`-tagged field (tag it
+`play:"readonly"`) or the `playsql.Model` aggregate bag, same as the `With*`
+columns.
+
 ## Soft deletes
 
 Add a `deleted_at` field tagged `play:"softdelete"`. Queries then exclude

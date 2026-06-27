@@ -79,6 +79,28 @@ func (t *TypedBuilder[T]) WhereRaw(sql string) *TypedBuilder[T] {
 	return t
 }
 
+func (t *TypedBuilder[T]) WhereColumn(column, op, other string) *TypedBuilder[T] {
+	t.b.WhereColumn(column, op, other)
+	return t
+}
+
+func (t *TypedBuilder[T]) OrWhereColumn(column, op, other string) *TypedBuilder[T] {
+	t.b.OrWhereColumn(column, op, other)
+	return t
+}
+
+// AddSelect adds a correlated subquery column (see (*Builder).AddSelect).
+func (t *TypedBuilder[T]) AddSelect(alias string, sub *Builder) *TypedBuilder[T] {
+	t.b.AddSelect(alias, sub)
+	return t
+}
+
+// OrderBySubquery orders by a correlated subquery (see (*Builder).OrderBySubquery).
+func (t *TypedBuilder[T]) OrderBySubquery(sub *Builder, dir Direction) *TypedBuilder[T] {
+	t.b.OrderBySubquery(sub, dir)
+	return t
+}
+
 // --- relationship aggregates (mirrors *Builder) ---
 
 func (t *TypedBuilder[T]) WithCount(relation string, opts ...AggOption) *TypedBuilder[T] {

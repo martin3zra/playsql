@@ -41,6 +41,7 @@ type Builder struct {
 	ctes        []grammar.CTE             // WITH prefixes for Update/UpdateReturning
 	returning   []string                  // columns for UpdateReturning
 	aggSelects  []grammar.AggregateSelect // withCount/withSum/… extra columns
+	subSelects  []grammar.SubSelectColumn // AddSelect correlated subquery columns
 	limit       int
 	offset      int
 	trashed     trashedMode
@@ -87,6 +88,18 @@ func (b *Builder) OrWhere(column, op string, value any) *Builder {
 // WhereEq is shorthand for Where(column, "=", value).
 func (b *Builder) WhereEq(column string, value any) *Builder {
 	return b.Where(column, "=", value)
+}
+
+// WhereColumn compares two columns (no bound value), e.g.
+// WhereColumn("destination_id", "=", "destinations.id"). Both sides are wrapped;
+// use a dotted name to reference another table (for correlated subqueries).
+func (b *Builder) WhereColumn(column, op, other string) *Builder {
+	return b.add(grammar.WhereClause{Kind: grammar.WhereColumn, Boolean: "AND", Column: column, Op: op, Second: other})
+}
+
+// OrWhereColumn is WhereColumn joined with OR.
+func (b *Builder) OrWhereColumn(column, op, other string) *Builder {
+	return b.add(grammar.WhereClause{Kind: grammar.WhereColumn, Boolean: "OR", Column: column, Op: op, Second: other})
 }
 
 // WhereRaw adds a verbatim SQL predicate (AND). The fragment is emitted as-is
@@ -795,6 +808,41 @@ func defaultAggAlias(s aggSpec) string {
 	}
 }
 
+// AddSelect adds a correlated subquery as an extra column named alias. sub is a
+// builder for the related table, typically correlated with WhereColumn:
+//
+//	sub := db.Model(&Flight{}).Select("name").
+//		WhereColumn("destination_id", "=", "destinations.id").
+//		OrderBy("arrived_at", playsql.Desc).Limit(1)
+//	playsql.Query[Destination](db).AddSelect("last_flight", sub).Get(ctx)
+//
+// The result scans into a matching db-tagged field (tag it play:"readonly") or
+// the model's aggregate bag, like the With* aggregates.
+func (b *Builder) AddSelect(alias string, sub *Builder) *Builder {
+	if b.err != nil {
+		return b
+	}
+	if sub == nil || sub.err != nil {
+		return b.fail(fmt.Errorf("playsql: AddSelect(%q): invalid subquery", alias))
+	}
+	b.subSelects = append(b.subSelects, grammar.SubSelectColumn{Query: sub.compiled(), Alias: alias})
+	return b
+}
+
+// OrderBySubquery orders the parent query by a correlated subquery (a single
+// scalar per row), e.g. sort destinations by their latest flight arrival.
+func (b *Builder) OrderBySubquery(sub *Builder, dir Direction) *Builder {
+	if b.err != nil {
+		return b
+	}
+	if sub == nil || sub.err != nil {
+		return b.fail(fmt.Errorf("playsql: OrderBySubquery: invalid subquery"))
+	}
+	sq := sub.compiled()
+	b.orders = append(b.orders, grammar.OrderClause{Direction: string(dir), Sub: &sq})
+	return b
+}
+
 // compiled assembles the dialect-neutral query from the builder's state.
 func (b *Builder) compiled() grammar.CompiledQuery {
 	cols := b.columns
@@ -805,6 +853,7 @@ func (b *Builder) compiled() grammar.CompiledQuery {
 		Table:      b.meta.Table,
 		Columns:    cols,
 		Aggregates: b.aggSelects,
+		SubSelects: b.subSelects,
 		Wheres:     b.effectiveWheres(b.trashed),
 		Orders:     b.orders,
 		Limit:      b.limit,

@@ -106,6 +106,26 @@ type itArticle struct {
 
 func (itArticle) TableName() string { return "it_articles" }
 
+// Subquery select/order: destinations + flights.
+type itDestination struct {
+	playsql.Model
+	ID         int64  `db:"id" play:"pk,incrementing"`
+	Name       string `db:"name" play:"fillable"`
+	LastFlight string `db:"last_flight" play:"readonly"` // AddSelect target
+}
+
+func (itDestination) TableName() string { return "it_destinations" }
+
+type itFlight struct {
+	playsql.Model
+	ID            int64  `db:"id" play:"pk,incrementing"`
+	DestinationID int64  `db:"destination_id" play:"fillable"`
+	Name          string `db:"name" play:"fillable"`
+	ArrivedAt     int64  `db:"arrived_at" play:"fillable"`
+}
+
+func (itFlight) TableName() string { return "it_flights" }
+
 func env(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -152,6 +172,10 @@ var ddl = map[string][]string{
 		`CREATE TABLE it_regions (id BIGSERIAL PRIMARY KEY, name TEXT)`,
 		`CREATE TABLE it_writers (id BIGSERIAL PRIMARY KEY, it_region_id BIGINT, name TEXT)`,
 		`CREATE TABLE it_articles (id BIGSERIAL PRIMARY KEY, it_writer_id BIGINT, title TEXT)`,
+		`DROP TABLE IF EXISTS it_flights`,
+		`DROP TABLE IF EXISTS it_destinations`,
+		`CREATE TABLE it_destinations (id BIGSERIAL PRIMARY KEY, name TEXT)`,
+		`CREATE TABLE it_flights (id BIGSERIAL PRIMARY KEY, destination_id BIGINT, name TEXT, arrived_at BIGINT)`,
 	},
 	"mysql": {
 		`DROP TABLE IF EXISTS it_books`,
@@ -174,6 +198,10 @@ var ddl = map[string][]string{
 		`CREATE TABLE it_regions (id BIGINT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(191))`,
 		`CREATE TABLE it_writers (id BIGINT AUTO_INCREMENT PRIMARY KEY, it_region_id BIGINT, name VARCHAR(191))`,
 		`CREATE TABLE it_articles (id BIGINT AUTO_INCREMENT PRIMARY KEY, it_writer_id BIGINT, title VARCHAR(191))`,
+		`DROP TABLE IF EXISTS it_flights`,
+		`DROP TABLE IF EXISTS it_destinations`,
+		`CREATE TABLE it_destinations (id BIGINT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(191))`,
+		`CREATE TABLE it_flights (id BIGINT AUTO_INCREMENT PRIMARY KEY, destination_id BIGINT, name VARCHAR(191), arrived_at BIGINT)`,
 	},
 	"mssql": {
 		`DROP TABLE IF EXISTS it_books`,
@@ -196,6 +224,10 @@ var ddl = map[string][]string{
 		`CREATE TABLE it_regions (id BIGINT IDENTITY(1,1) PRIMARY KEY, name NVARCHAR(191))`,
 		`CREATE TABLE it_writers (id BIGINT IDENTITY(1,1) PRIMARY KEY, it_region_id BIGINT, name NVARCHAR(191))`,
 		`CREATE TABLE it_articles (id BIGINT IDENTITY(1,1) PRIMARY KEY, it_writer_id BIGINT, title NVARCHAR(191))`,
+		`DROP TABLE IF EXISTS it_flights`,
+		`DROP TABLE IF EXISTS it_destinations`,
+		`CREATE TABLE it_destinations (id BIGINT IDENTITY(1,1) PRIMARY KEY, name NVARCHAR(191))`,
+		`CREATE TABLE it_flights (id BIGINT IDENTITY(1,1) PRIMARY KEY, destination_id BIGINT, name NVARCHAR(191), arrived_at BIGINT)`,
 	},
 }
 
@@ -218,7 +250,58 @@ func TestIntegration(t *testing.T) {
 			runSuite(t, db)
 			runRawReturningSuite(t, db, drv.dialect)
 			runExistenceSuite(t, db)
+			runSubquerySuite(t, db)
 		})
+	}
+}
+
+// runSubquerySuite exercises AddSelect and OrderBySubquery (correlated subquery
+// select and ordering) against a live database.
+func runSubquerySuite(t *testing.T, db *playsql.DB) {
+	ctx := context.Background()
+
+	nyc := &itDestination{Name: "NYC"}
+	lax := &itDestination{Name: "LAX"}
+	for _, d := range []*itDestination{nyc, lax} {
+		if err := db.Insert(ctx, d); err != nil {
+			t.Fatalf("insert destination: %v", err)
+		}
+	}
+	for _, f := range []*itFlight{
+		{DestinationID: nyc.ID, Name: "DL100", ArrivedAt: 10},
+		{DestinationID: nyc.ID, Name: "DL200", ArrivedAt: 30}, // latest for NYC
+		{DestinationID: lax.ID, Name: "AA1", ArrivedAt: 20},
+	} {
+		if err := db.Insert(ctx, f); err != nil {
+			t.Fatalf("insert flight: %v", err)
+		}
+	}
+
+	sub := func(col string) *playsql.Builder {
+		return db.Model(&itFlight{}).Select(col).
+			WhereColumn("destination_id", "=", "it_destinations.id").
+			OrderBy("arrived_at", playsql.Desc).Limit(1)
+	}
+
+	// AddSelect: each destination's most recent flight name.
+	withLast, err := playsql.Query[itDestination](db).
+		AddSelect("last_flight", sub("name")).
+		OrderBy("id", playsql.Asc).Get(ctx)
+	if err != nil {
+		t.Fatalf("addselect: %v", err)
+	}
+	if len(withLast) != 2 || withLast[0].LastFlight != "DL200" || withLast[1].LastFlight != "AA1" {
+		t.Fatalf("AddSelect(last_flight) wrong: %+v", withLast)
+	}
+
+	// OrderBySubquery: sort by latest arrival desc -> NYC (30) before LAX (20).
+	ordered, err := playsql.Query[itDestination](db).
+		OrderBySubquery(sub("arrived_at"), playsql.Desc).Get(ctx)
+	if err != nil {
+		t.Fatalf("orderbysubquery: %v", err)
+	}
+	if len(ordered) != 2 || ordered[0].Name != "NYC" || ordered[1].Name != "LAX" {
+		t.Fatalf("OrderBySubquery wrong: %+v", ordered)
 	}
 }
 
