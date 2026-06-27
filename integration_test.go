@@ -30,9 +30,10 @@ type itPerson struct {
 func (itPerson) TableName() string { return "it_people" }
 
 type itAuthor struct {
-	ID    int64     `db:"id" play:"pk,incrementing"`
-	Name  string    `db:"name"`
-	Books []*itBook `play:"hasMany,foreignKey=author_id"`
+	ID         int64     `db:"id" play:"pk,incrementing"`
+	Name       string    `db:"name"`
+	Books      []*itBook `play:"hasMany,foreignKey=author_id"`
+	BooksCount int64     `db:"books_count" play:"readonly"` // LoadCount target
 }
 
 func (itAuthor) TableName() string { return "it_authors" }
@@ -396,6 +397,22 @@ func runExistenceSuite(t *testing.T, db *playsql.DB) {
 	for _, r := range ac {
 		if w, ok := wantArticles[r.Name]; ok && r.ArticlesCount != w {
 			t.Fatalf("region %q ArticlesCount = %d, want %d", r.Name, r.ArticlesCount, w)
+		}
+	}
+
+	// Deferred aggregate loading (post-fetch) on hasMany: author "A" has 2 books,
+	// "Childless" has 0.
+	var authors []itAuthor
+	if err := db.Model(&itAuthor{}).Get(ctx, &authors); err != nil {
+		t.Fatalf("get authors: %v", err)
+	}
+	if err := db.LoadCount(ctx, &authors, "Books"); err != nil {
+		t.Fatalf("loadcount books: %v", err)
+	}
+	wantBooks := map[string]int64{"A": 2, "Childless": 0}
+	for _, a := range authors {
+		if w, ok := wantBooks[a.Name]; ok && a.BooksCount != w {
+			t.Fatalf("author %q BooksCount = %d, want %d", a.Name, a.BooksCount, w)
 		}
 	}
 }

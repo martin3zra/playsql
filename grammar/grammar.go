@@ -634,6 +634,50 @@ func writeExistsWhere(g Grammar, sb *strings.Builder, clauses []WhereClause, n *
 	return args
 }
 
+// GroupedAggregate describes the batched query behind deferred aggregate loading
+// (LoadCount/LoadSum/…): one aggregate per key value over a related table.
+type GroupedAggregate struct {
+	Table     string
+	KeyColumn string // grouped/selected key (the join column on the related side)
+	Func      string // COUNT | SUM | AVG | MIN | MAX
+	Column    string // aggregated column; "" => FN(*)
+	Wheres    []WhereClause
+}
+
+// CompileGroupedAggregate builds
+// "SELECT <key>, <fn>(<col|*>) AS agg FROM <table> WHERE <wheres> GROUP BY <key>".
+// Wheres typically carries the parent-key IN list plus constraints/soft-delete.
+func CompileGroupedAggregate(g Grammar, q GroupedAggregate) (string, []any) {
+	var sb strings.Builder
+	sb.WriteString("SELECT ")
+	sb.WriteString(g.Wrap(q.KeyColumn))
+	sb.WriteString(", ")
+	sb.WriteString(q.Func)
+	sb.WriteByte('(')
+	if q.Column == "" {
+		sb.WriteByte('*')
+	} else {
+		sb.WriteString(g.Wrap(q.Column))
+	}
+	sb.WriteString(") AS ")
+	sb.WriteString(g.Wrap("agg"))
+	sb.WriteString(" FROM ")
+	sb.WriteString(g.Wrap(q.Table))
+
+	var args []any
+	if len(q.Wheres) > 0 {
+		n := 0
+		clause, wargs := compileWheres(g, q.Wheres, &n)
+		sb.WriteString(" WHERE ")
+		sb.WriteString(clause)
+		args = wargs
+	}
+
+	sb.WriteString(" GROUP BY ")
+	sb.WriteString(g.Wrap(q.KeyColumn))
+	return sb.String(), args
+}
+
 // compileAggregate renders one correlated aggregate subquery as a select column,
 // threading n through its correlation/constraint binds. EXISTS uses a portable
 // CASE WHEN EXISTS form; the rest are scalar (SELECT fn(col) FROM ...) subqueries.

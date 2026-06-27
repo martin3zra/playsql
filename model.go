@@ -103,6 +103,30 @@ func parseNumeric(s string) int64 {
 	return 0
 }
 
+// toFloat64 coerces the common driver scalar representations to float64.
+func toFloat64(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case float32:
+		return float64(n)
+	case int64:
+		return float64(n)
+	case int:
+		return float64(n)
+	case int32:
+		return float64(n)
+	case []byte:
+		f, _ := strconv.ParseFloat(string(n), 64)
+		return f
+	case string:
+		f, _ := strconv.ParseFloat(n, 64)
+		return f
+	default:
+		return 0
+	}
+}
+
 // baseOf returns the embedded Model accessor if the value has one.
 func baseOf(model any) (baseAccessor, bool) {
 	acc, ok := model.(baseAccessor)

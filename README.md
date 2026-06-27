@@ -347,8 +347,27 @@ The result has two possible homes, and they coexist:
   ```
 
 Works across all relation kinds (many-to-many and through aggregate over the
-related/far table via an `IN` subquery). Deferred post-fetch loading
-(`loadCount`-style) is not yet available.
+related/far table via an `IN` subquery).
+
+**Deferred loading.** Compute an aggregate for models you have *already*
+retrieved, in one batched `GROUP BY` query — `LoadCount`, `LoadSum`, `LoadAvg`,
+`LoadMin`, `LoadMax`, `LoadExists`. They accept a single model or a slice and
+fill the same destinations (typed field or aggregate bag):
+
+```go
+var post Post
+db.Model(&Post{}).Find(ctx, &post, id)
+db.LoadCount(ctx, &post, "comments")                 // post.CommentsCount / post.CountOf("comments")
+
+var posts []Post
+db.Model(&Post{}).Get(ctx, &posts)
+db.LoadSum(ctx, &posts, "comments", "votes")
+db.LoadCount(ctx, &posts, "comments", playsql.As("approved_count"),
+    playsql.Constrain(func(q *playsql.Builder) { q.WhereEq("approved", true) }))
+```
+
+Deferred loading covers `hasMany`, `hasOne`, and `belongsTo`; for
+`belongsToMany`/`has*Through` use the query-time `With*` methods.
 
 ## Soft deletes
 

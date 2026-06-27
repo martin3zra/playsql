@@ -87,6 +87,45 @@ func TestCompileSelect_AggregateBindOrdering(t *testing.T) {
 	}
 }
 
+func TestCompileGroupedAggregate(t *testing.T) {
+	sql, args := CompileGroupedAggregate(Postgres{}, GroupedAggregate{
+		Table:     "comments",
+		KeyColumn: "post_id",
+		Func:      "COUNT",
+		Wheres: []WhereClause{
+			{Kind: WhereIn, Column: "post_id", Values: []any{int64(1), int64(2)}},
+		},
+	})
+	want := `SELECT "post_id", COUNT(*) AS "agg" FROM "comments" WHERE "post_id" IN ($1, $2) GROUP BY "post_id"`
+	if sql != want {
+		t.Errorf("sql:\n got: %s\nwant: %s", sql, want)
+	}
+	if len(args) != 2 || args[0] != int64(1) || args[1] != int64(2) {
+		t.Errorf("args = %v, want [1 2]", args)
+	}
+}
+
+func TestCompileGroupedAggregate_SumWithConstraint(t *testing.T) {
+	sql, args := CompileGroupedAggregate(MySQL{}, GroupedAggregate{
+		Table:     "comments",
+		KeyColumn: "post_id",
+		Func:      "SUM",
+		Column:    "votes",
+		Wheres: []WhereClause{
+			{Kind: WhereIn, Column: "post_id", Values: []any{int64(1)}},
+			{Kind: WhereBasic, Boolean: "AND", Column: "approved", Op: "=", Value: true},
+		},
+	})
+	want := "SELECT `post_id`, SUM(`votes`) AS `agg` FROM `comments` " +
+		"WHERE `post_id` IN (?) AND `approved` = ? GROUP BY `post_id`"
+	if sql != want {
+		t.Errorf("sql:\n got: %s\nwant: %s", sql, want)
+	}
+	if len(args) != 2 || args[1] != true {
+		t.Errorf("args = %v", args)
+	}
+}
+
 func TestCompileSelect_WithCount_ManyToMany(t *testing.T) {
 	// roles counted through the role_user pivot via an IN-subquery.
 	q := CompiledQuery{
