@@ -16,6 +16,7 @@ type ColumnMeta struct {
 	FieldIndex int    // index into the struct's fields
 	PrimaryKey bool
 	Cast       string // e.g. "json"; empty for a plain scalar column
+	ReadOnly   bool   // scanned but never written (e.g. aggregate result columns)
 }
 
 // RelationKind enumerates the supported relationship types.
@@ -196,10 +197,16 @@ func (m *ModelMeta) Column(col string) (ColumnMeta, bool) {
 }
 
 // ColumnNames returns the database column names in declaration order.
+// ColumnNames returns the real table columns for the default SELECT projection.
+// ReadOnly columns (computed/aggregate results with no backing column) are
+// excluded — they only appear when explicitly added as aggregate subqueries.
 func (m *ModelMeta) ColumnNames() []string {
-	names := make([]string, len(m.Columns))
-	for i, c := range m.Columns {
-		names[i] = c.DBName
+	names := make([]string, 0, len(m.Columns))
+	for _, c := range m.Columns {
+		if c.ReadOnly {
+			continue
+		}
+		names = append(names, c.DBName)
 	}
 	return names
 }

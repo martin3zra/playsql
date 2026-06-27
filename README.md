@@ -305,6 +305,51 @@ nested (dotted) paths. `belongsToMany` counts pivot rows (equal to the related
 count for a duplicate-free pivot); `has*Through` counts the far rows exactly via
 an `IN` subquery.
 
+### Aggregating related models
+
+Pull a per-parent aggregate over a relation as an extra column, without loading
+the related rows — `WithCount`, `WithSum`, `WithAvg`, `WithMin`, `WithMax`,
+`WithExists` (each a correlated subquery, no JOIN). The default column name is
+`{relation}_{func}[_{column}]` (`comments_count`, `comments_sum_votes`,
+`comments_exists`); override with `As`, constrain with `Constrain`.
+
+```go
+playsql.Query[Post](db).
+    WithCount("comments").
+    WithSum("comments", "votes").
+    WithExists("comments").
+    WithCount("comments", playsql.As("pending_count"),
+        playsql.Constrain(func(q *playsql.Builder) { q.WhereEq("approved", false) })).
+    Get(ctx)
+```
+
+The result has two possible homes, and they coexist:
+
+- **Typed field** — declare a `db`-tagged field matching the column name and tag
+  it `play:"readonly"` (scanned, never written, excluded from default selects):
+
+  ```go
+  type Post struct {
+      playsql.Model
+      ID            int64 `db:"id" play:"pk,incrementing"`
+      CommentsCount int64 `db:"comments_count" play:"readonly"`
+  }
+  // post.CommentsCount
+  ```
+
+- **Dynamic bag** — if the model embeds `playsql.Model` and has no matching
+  field, the value lands in an aggregate bag:
+
+  ```go
+  n, ok := post.Aggregate("comments_count") // raw value
+  post.CountOf("comments")                  // -> comments_count as int64
+  post.SumOf("comments", "votes")           // -> comments_sum_votes as int64
+  ```
+
+Works across all relation kinds (many-to-many and through aggregate over the
+related/far table via an `IN` subquery). Deferred post-fetch loading
+(`loadCount`-style) is not yet available.
+
 ## Soft deletes
 
 Add a `deleted_at` field tagged `play:"softdelete"`. Queries then exclude

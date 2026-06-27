@@ -79,6 +79,38 @@ func (t *TypedBuilder[T]) WhereRaw(sql string) *TypedBuilder[T] {
 	return t
 }
 
+// --- relationship aggregates (mirrors *Builder) ---
+
+func (t *TypedBuilder[T]) WithCount(relation string, opts ...AggOption) *TypedBuilder[T] {
+	t.b.WithCount(relation, opts...)
+	return t
+}
+
+func (t *TypedBuilder[T]) WithSum(relation, column string, opts ...AggOption) *TypedBuilder[T] {
+	t.b.WithSum(relation, column, opts...)
+	return t
+}
+
+func (t *TypedBuilder[T]) WithAvg(relation, column string, opts ...AggOption) *TypedBuilder[T] {
+	t.b.WithAvg(relation, column, opts...)
+	return t
+}
+
+func (t *TypedBuilder[T]) WithMin(relation, column string, opts ...AggOption) *TypedBuilder[T] {
+	t.b.WithMin(relation, column, opts...)
+	return t
+}
+
+func (t *TypedBuilder[T]) WithMax(relation, column string, opts ...AggOption) *TypedBuilder[T] {
+	t.b.WithMax(relation, column, opts...)
+	return t
+}
+
+func (t *TypedBuilder[T]) WithExists(relation string, opts ...AggOption) *TypedBuilder[T] {
+	t.b.WithExists(relation, opts...)
+	return t
+}
+
 // --- relationship existence (mirrors *Builder) ---
 
 func (t *TypedBuilder[T]) Has(relation string) *TypedBuilder[T] {

@@ -102,16 +102,36 @@ func scanInto(structVal reflect.Value, cols []string, meta *metadata.ModelMeta) 
 		field  reflect.Value
 		caster Caster
 	}
+	type extraBinding struct {
+		name string
+		raw  reflect.Value // *any target
+	}
 
 	targets = make([]any, len(cols))
 	var binds []binding
 	var castBinds []castBinding
+	var extraBinds []extraBinding
+
+	// Unmapped columns (e.g. aggregate results) land in the model's extra bag
+	// when it embeds playsql.Model; otherwise they are discarded.
+	var base baseAccessor
+	if structVal.CanAddr() {
+		if acc, ok := baseOf(structVal.Addr().Interface()); ok {
+			base = acc
+		}
+	}
 
 	for i, col := range cols {
 		cm, ok := meta.Column(col)
 		if !ok {
-			var discard any
-			targets[i] = &discard
+			if base != nil {
+				raw := reflect.New(anyType) // *any
+				targets[i] = raw.Interface()
+				extraBinds = append(extraBinds, extraBinding{name: col, raw: raw})
+			} else {
+				var discard any
+				targets[i] = &discard
+			}
 			continue
 		}
 		field := structVal.Field(cm.FieldIndex)
@@ -142,6 +162,9 @@ func scanInto(structVal reflect.Value, cols []string, meta *metadata.ModelMeta) 
 				continue
 			}
 			_ = cb.caster.Decode(raw, cb.field)
+		}
+		for _, eb := range extraBinds {
+			base.playSetExtra(eb.name, eb.raw.Elem().Interface())
 		}
 	}
 	return targets, finish

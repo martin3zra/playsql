@@ -55,6 +55,7 @@ func parse(t reflect.Type) *ModelMeta {
 		isPK := false
 		cast := ""
 		isPivotField := false
+		readOnly := false
 		if play := f.Tag.Get("play"); play != "" {
 			for _, opt := range strings.Split(play, ",") {
 				opt = strings.TrimSpace(opt)
@@ -81,6 +82,8 @@ func parse(t reflect.Type) *ModelMeta {
 					m.Guarded = append(m.Guarded, col)
 				case "pivot":
 					isPivotField = true
+				case "readonly":
+					readOnly = true
 				}
 			}
 		}
@@ -108,7 +111,7 @@ func parse(t reflect.Type) *ModelMeta {
 			m.UpdatedAtColumn = col
 		}
 
-		m.Columns = append(m.Columns, ColumnMeta{DBName: col, FieldIndex: i, PrimaryKey: isPK, Cast: cast})
+		m.Columns = append(m.Columns, ColumnMeta{DBName: col, FieldIndex: i, PrimaryKey: isPK, Cast: cast, ReadOnly: readOnly})
 		m.fieldByCol[col] = i
 	}
 
@@ -274,6 +277,10 @@ func isRelationField(t reflect.Type) bool {
 }
 
 // snake converts CamelCase / PascalCase to snake_case.
+// Snake exposes the package's snake_case conversion for default aggregate alias
+// naming (e.g. relation "BlogPosts" -> "blog_posts_count").
+func Snake(s string) string { return snake(s) }
+
 func snake(s string) string {
 	var b strings.Builder
 	for i, r := range s {

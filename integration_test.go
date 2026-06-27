@@ -65,6 +65,8 @@ type itWidget struct {
 	Price int64    `db:"price" play:"fillable"`
 	Cheap bool     `db:"cheap" play:"fillable"`
 	Tags  []*itTag `play:"belongsToMany,pivot=it_widget_tag"`
+
+	TagsCount int64 `db:"tags_count" play:"readonly"` // WithCount target (Strategy A)
 }
 
 func (itWidget) TableName() string { return "it_widgets" }
@@ -81,6 +83,8 @@ type itRegion struct {
 	ID       int64        `db:"id" play:"pk,incrementing"`
 	Name     string       `db:"name" play:"fillable"`
 	Articles []*itArticle `play:"hasManyThrough,through=it_writers"`
+
+	ArticlesCount int64 `db:"articles_count" play:"readonly"` // WithCount target (Strategy A)
 }
 
 func (itRegion) TableName() string { return "it_regions" }
@@ -365,6 +369,34 @@ func runExistenceSuite(t *testing.T, db *playsql.DB) {
 	}
 	if len(whereHasArticle) != 1 || whereHasArticle[0].Name != "North" {
 		t.Fatalf("WhereHas(Articles like a%%) wrong: %+v", whereHasArticle)
+	}
+
+	// Aggregate columns (WithCount) — Strategy A fields populated in one query.
+	// belongsToMany via pivot: widget "a" has 1 tag, others 0.
+	wc, err := playsql.Query[itWidget](db).WithCount("Tags").Get(ctx)
+	if err != nil {
+		t.Fatalf("withcount tags: %v", err)
+	}
+	for _, w := range wc {
+		want := int64(0)
+		if w.Name == "a" {
+			want = 1
+		}
+		if w.TagsCount != want {
+			t.Fatalf("widget %q TagsCount = %d, want %d", w.Name, w.TagsCount, want)
+		}
+	}
+
+	// has*Through: North 3 articles, South 1, East 0.
+	ac, err := playsql.Query[itRegion](db).WithCount("Articles").Get(ctx)
+	if err != nil {
+		t.Fatalf("withcount articles: %v", err)
+	}
+	wantArticles := map[string]int64{"North": 3, "South": 1, "East": 0}
+	for _, r := range ac {
+		if w, ok := wantArticles[r.Name]; ok && r.ArticlesCount != w {
+			t.Fatalf("region %q ArticlesCount = %d, want %d", r.Name, r.ArticlesCount, w)
+		}
 	}
 }
 

@@ -74,13 +74,29 @@ type RelationExists struct {
 // produced. It carries no SQL text and no placeholders — those are the
 // grammar's job.
 type CompiledQuery struct {
-	Table     string
-	Columns   []string // empty => SELECT *
-	Aggregate string   // e.g. "COUNT(*)"; overrides Columns, emitted verbatim
-	Wheres    []WhereClause
-	Orders    []OrderClause
-	Limit     int // 0 => no LIMIT
-	Offset    int // 0 => no OFFSET
+	Table      string
+	Columns    []string          // empty => SELECT *
+	Aggregate  string            // e.g. "COUNT(*)"; overrides Columns, emitted verbatim
+	Aggregates []AggregateSelect // extra correlated-subquery columns (withCount/withSum/…)
+	Wheres     []WhereClause
+	Orders     []OrderClause
+	Limit      int // 0 => no LIMIT
+	Offset     int // 0 => no OFFSET
+}
+
+// AggregateSelect is a correlated scalar subquery emitted as an extra select
+// column, e.g. "(SELECT COUNT(*) FROM comments WHERE comments.post_id =
+// posts.id) AS comments_count". On carries the correlation (WhereColumn, or
+// WhereInSub for many-to-many/through); Wheres carries constraint/soft-delete
+// predicates. Func EXISTS renders a CASE WHEN EXISTS form (SQL Server forbids a
+// bare EXISTS in a select list).
+type AggregateSelect struct {
+	Func   string // COUNT | SUM | AVG | MIN | MAX | EXISTS
+	Column string // aggregated column (qualified); "" => COUNT(*); ignored for EXISTS
+	Table  string
+	On     []WhereClause
+	Wheres []WhereClause
+	Alias  string
 }
 
 // OrderClause is one ORDER BY term. Direction is "ASC" or "DESC".
@@ -175,26 +191,35 @@ func For(driver string) Grammar {
 // dialect-specific row-limiting clause to the caller. hasOrder reports whether
 // an ORDER BY was emitted.
 func selectCore(g Grammar, q CompiledQuery) (sql string, args []any, hasOrder bool) {
-	cols := "*"
-	switch {
-	case q.Aggregate != "":
-		cols = q.Aggregate // verbatim, e.g. COUNT(*)
-	case len(q.Columns) > 0:
-		wrapped := make([]string, len(q.Columns))
-		for i, c := range q.Columns {
-			wrapped[i] = g.Wrap(c)
-		}
-		cols = strings.Join(wrapped, ", ")
-	}
-
 	var sb strings.Builder
 	sb.WriteString("SELECT ")
-	sb.WriteString(cols)
+
+	// n threads contiguously across aggregate subquery columns (which may carry
+	// binds from constraint closures) and then the WHERE clause.
+	n := 0
+	if q.Aggregate != "" {
+		sb.WriteString(q.Aggregate) // verbatim, e.g. COUNT(*)
+	} else {
+		if len(q.Columns) > 0 {
+			for i, c := range q.Columns {
+				if i > 0 {
+					sb.WriteString(", ")
+				}
+				sb.WriteString(g.Wrap(c))
+			}
+		} else {
+			sb.WriteByte('*')
+		}
+		for _, a := range q.Aggregates {
+			sb.WriteString(", ")
+			args = append(args, compileAggregate(g, &sb, a, &n)...)
+		}
+	}
+
 	sb.WriteString(" FROM ")
 	sb.WriteString(g.Wrap(q.Table))
 
 	if len(q.Wheres) > 0 {
-		n := 0
 		clause, wargs := compileWheres(g, q.Wheres, &n)
 		sb.WriteString(" WHERE ")
 		sb.WriteString(clause)
@@ -604,6 +629,50 @@ func writeExistsWhere(g Grammar, sb *strings.Builder, clauses []WhereClause, n *
 		return nil
 	}
 	clause, args := compileWheres(g, clauses, n)
+	sb.WriteString(" WHERE ")
+	sb.WriteString(clause)
+	return args
+}
+
+// compileAggregate renders one correlated aggregate subquery as a select column,
+// threading n through its correlation/constraint binds. EXISTS uses a portable
+// CASE WHEN EXISTS form; the rest are scalar (SELECT fn(col) FROM ...) subqueries.
+func compileAggregate(g Grammar, sb *strings.Builder, a AggregateSelect, n *int) []any {
+	var args []any
+	if a.Func == "EXISTS" {
+		sb.WriteString("CASE WHEN EXISTS (SELECT 1 FROM ")
+		sb.WriteString(g.Wrap(a.Table))
+		args = writeAggWhere(g, sb, a.On, a.Wheres, n)
+		sb.WriteString(") THEN 1 ELSE 0 END")
+	} else {
+		sb.WriteString("(SELECT ")
+		sb.WriteString(a.Func)
+		sb.WriteByte('(')
+		if a.Column == "" {
+			sb.WriteByte('*')
+		} else {
+			sb.WriteString(g.Wrap(a.Column))
+		}
+		sb.WriteByte(')')
+		sb.WriteString(" FROM ")
+		sb.WriteString(g.Wrap(a.Table))
+		args = writeAggWhere(g, sb, a.On, a.Wheres, n)
+		sb.WriteByte(')')
+	}
+	sb.WriteString(" AS ")
+	sb.WriteString(g.Wrap(a.Alias))
+	return args
+}
+
+// writeAggWhere appends " WHERE <on AND wheres>" to sb when present, threading n.
+func writeAggWhere(g Grammar, sb *strings.Builder, on, wheres []WhereClause, n *int) []any {
+	combined := make([]WhereClause, 0, len(on)+len(wheres))
+	combined = append(combined, on...)
+	combined = append(combined, wheres...)
+	if len(combined) == 0 {
+		return nil
+	}
+	clause, args := compileWheres(g, combined, n)
 	sb.WriteString(" WHERE ")
 	sb.WriteString(clause)
 	return args

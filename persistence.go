@@ -33,6 +33,9 @@ func (s *session) Insert(ctx context.Context, model any) error {
 	var columns []string
 	var values []any
 	for _, c := range meta.Columns {
+		if c.ReadOnly {
+			continue // computed/aggregate column; never written
+		}
 		// Skip an auto-incrementing primary key when unset; let the DB assign it.
 		if c.PrimaryKey && meta.Incrementing && elem.Field(c.FieldIndex).IsZero() {
 			continue
@@ -116,6 +119,9 @@ func (s *session) Update(ctx context.Context, model any) error {
 	var columns []string
 	var values []any
 	for _, c := range meta.Columns {
+		if c.ReadOnly {
+			continue // computed/aggregate column; never written
+		}
 		if c.FieldIndex == pkIdx {
 			continue
 		}

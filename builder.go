@@ -38,8 +38,9 @@ type Builder struct {
 	scopeWheres []grammar.WhereClause // predicates added by global scopes
 	orders      []grammar.OrderClause
 	withs       []withClause
-	ctes        []grammar.CTE // WITH prefixes for Update/UpdateReturning
-	returning   []string      // columns for UpdateReturning
+	ctes        []grammar.CTE             // WITH prefixes for Update/UpdateReturning
+	returning   []string                  // columns for UpdateReturning
+	aggSelects  []grammar.AggregateSelect // withCount/withSum/… extra columns
 	limit       int
 	offset      int
 	trashed     trashedMode
@@ -609,6 +610,191 @@ func (b *Builder) WithCTE(name, rawSQL string) *Builder {
 	return b
 }
 
+// --- relationship aggregates (withCount/withSum/…) ---
+//
+// Each adds a correlated-subquery column to the SELECT, exposing the result as
+// {relation}_{func}[_{column}] (override with As). The value scans into a
+// matching db-tagged field if one exists, otherwise into the model's aggregate
+// bag (reachable via Aggregate/CountOf/SumOf) when it embeds playsql.Model.
+
+// aggSpec is the pre-resolution description of one requested aggregate.
+type aggSpec struct {
+	relation string
+	fn       string // COUNT | SUM | AVG | MIN | MAX | EXISTS
+	column   string // related column for SUM/AVG/MIN/MAX
+	alias    string // explicit alias; "" => default naming
+	where    func(*Builder)
+}
+
+// AggOption customizes a With* aggregate (alias, constraint).
+type AggOption func(*aggSpec)
+
+// As sets the output column alias for an aggregate.
+func As(alias string) AggOption { return func(s *aggSpec) { s.alias = alias } }
+
+// Constrain adds predicates to an aggregate's related subquery.
+func Constrain(fn func(*Builder)) AggOption { return func(s *aggSpec) { s.where = fn } }
+
+// WithCount adds a count of the relation as {relation}_count.
+func (b *Builder) WithCount(relation string, opts ...AggOption) *Builder {
+	return b.addAggregate("COUNT", relation, "", opts)
+}
+
+// WithSum adds a sum of column over the relation as {relation}_sum_{column}.
+func (b *Builder) WithSum(relation, column string, opts ...AggOption) *Builder {
+	return b.addAggregate("SUM", relation, column, opts)
+}
+
+// WithAvg adds an average of column over the relation.
+func (b *Builder) WithAvg(relation, column string, opts ...AggOption) *Builder {
+	return b.addAggregate("AVG", relation, column, opts)
+}
+
+// WithMin adds the minimum of column over the relation.
+func (b *Builder) WithMin(relation, column string, opts ...AggOption) *Builder {
+	return b.addAggregate("MIN", relation, column, opts)
+}
+
+// WithMax adds the maximum of column over the relation.
+func (b *Builder) WithMax(relation, column string, opts ...AggOption) *Builder {
+	return b.addAggregate("MAX", relation, column, opts)
+}
+
+// WithExists adds a boolean (0/1) column reporting whether the relation exists,
+// as {relation}_exists.
+func (b *Builder) WithExists(relation string, opts ...AggOption) *Builder {
+	return b.addAggregate("EXISTS", relation, "", opts)
+}
+
+func (b *Builder) addAggregate(fn, relation, column string, opts []AggOption) *Builder {
+	if b.err != nil {
+		return b
+	}
+	s := aggSpec{relation: relation, fn: fn, column: column}
+	for _, o := range opts {
+		o(&s)
+	}
+	sel, err := b.buildAggregate(s)
+	if err != nil {
+		return b.fail(err)
+	}
+	b.aggSelects = append(b.aggSelects, sel)
+	return b
+}
+
+// buildAggregate resolves an aggSpec into a grammar.AggregateSelect, including
+// correlation, default alias, the aggregated column, related soft-delete, and
+// any constraint closure.
+func (b *Builder) buildAggregate(s aggSpec) (grammar.AggregateSelect, error) {
+	rel, ok := b.meta.Relations[s.relation]
+	if !ok {
+		return grammar.AggregateSelect{}, fmt.Errorf("playsql: unknown relation %q on %s", s.relation, b.meta.StructName)
+	}
+	relatedMeta := metadata.For(reflect.New(rel.RelatedType).Interface())
+
+	table, on, err := aggregateCorrelation(b.meta, rel, relatedMeta)
+	if err != nil {
+		return grammar.AggregateSelect{}, err
+	}
+
+	sel := grammar.AggregateSelect{Func: s.fn, Table: table, On: on, Alias: s.alias}
+	if sel.Alias == "" {
+		sel.Alias = defaultAggAlias(s)
+	}
+	if s.fn != "COUNT" && s.fn != "EXISTS" {
+		sel.Column = relatedMeta.Table + "." + s.column
+	}
+	if relatedMeta.SoftDeletes {
+		sel.Wheres = append(sel.Wheres, grammar.WhereClause{
+			Kind:    grammar.WhereNull,
+			Boolean: "AND",
+			Column:  relatedMeta.Table + "." + relatedMeta.DeletedAtColumn,
+		})
+	}
+	if s.where != nil {
+		sub := &Builder{sess: b.sess, meta: relatedMeta}
+		s.where(sub)
+		if sub.err != nil {
+			return grammar.AggregateSelect{}, sub.err
+		}
+		sel.Wheres = append(sel.Wheres, sub.wheres...)
+	}
+	return sel, nil
+}
+
+// aggregateCorrelation returns the subquery FROM table and the correlation
+// predicate(s) tying an aggregate over a relation to its parent. Simple kinds
+// correlate directly; belongsToMany and has*Through correlate through the
+// junction via an IN-subquery (so the aggregate runs over the related/far table).
+func aggregateCorrelation(parentMeta *metadata.ModelMeta, rel metadata.RelationMeta, relatedMeta *metadata.ModelMeta) (string, []grammar.WhereClause, error) {
+	switch rel.Kind {
+	case metadata.HasMany, metadata.HasOne:
+		foreignKey, otherKey := metadata.ResolveRelationKeys(parentMeta, rel, relatedMeta)
+		return relatedMeta.Table, []grammar.WhereClause{{
+			Kind:   grammar.WhereColumn,
+			Column: relatedMeta.Table + "." + foreignKey,
+			Op:     "=",
+			Second: parentMeta.Table + "." + otherKey,
+		}}, nil
+
+	case metadata.BelongsTo:
+		foreignKey, otherKey := metadata.ResolveRelationKeys(parentMeta, rel, relatedMeta)
+		return relatedMeta.Table, []grammar.WhereClause{{
+			Kind:   grammar.WhereColumn,
+			Column: parentMeta.Table + "." + foreignKey,
+			Op:     "=",
+			Second: relatedMeta.Table + "." + otherKey,
+		}}, nil
+
+	case metadata.BelongsToMany:
+		pivotTable, fpk, rpk, parentKey, relatedKey := metadata.ResolvePivot(parentMeta, rel, relatedMeta)
+		return relatedMeta.Table, []grammar.WhereClause{{
+			Kind:   grammar.WhereInSub,
+			Column: relatedMeta.Table + "." + relatedKey,
+			Sub: &grammar.Subselect{
+				Column: pivotTable + "." + rpk,
+				Table:  pivotTable,
+				Wheres: []grammar.WhereClause{{
+					Kind: grammar.WhereColumn, Column: pivotTable + "." + fpk, Op: "=", Second: parentMeta.Table + "." + parentKey,
+				}},
+			},
+		}}, nil
+
+	case metadata.HasManyThrough, metadata.HasOneThrough:
+		if rel.ThroughTable == "" {
+			return "", nil, fmt.Errorf("playsql: relation %q: %s requires a through= table", rel.Name, rel.Kind)
+		}
+		throughTable, firstKey, secondKey, throughKey, localKey := metadata.ResolveThrough(parentMeta, rel)
+		return relatedMeta.Table, []grammar.WhereClause{{
+			Kind:   grammar.WhereInSub,
+			Column: relatedMeta.Table + "." + secondKey,
+			Sub: &grammar.Subselect{
+				Column: throughTable + "." + throughKey,
+				Table:  throughTable,
+				Wheres: []grammar.WhereClause{{
+					Kind: grammar.WhereColumn, Column: throughTable + "." + firstKey, Op: "=", Second: parentMeta.Table + "." + localKey,
+				}},
+			},
+		}}, nil
+
+	default:
+		return "", nil, fmt.Errorf("playsql: aggregates not supported for %s relations", rel.Kind)
+	}
+}
+
+// defaultAggAlias builds the Eloquent-style column name for an aggregate.
+func defaultAggAlias(s aggSpec) string {
+	base := metadata.Snake(s.relation)
+	switch s.fn {
+	case "COUNT":
+		return base + "_count"
+	case "EXISTS":
+		return base + "_exists"
+	default:
+		return base + "_" + strings.ToLower(s.fn) + "_" + s.column
+	}
+}
+
 // compiled assembles the dialect-neutral query from the builder's state.
 func (b *Builder) compiled() grammar.CompiledQuery {
 	cols := b.columns
@@ -616,12 +802,13 @@ func (b *Builder) compiled() grammar.CompiledQuery {
 		cols = b.meta.ColumnNames()
 	}
 	return grammar.CompiledQuery{
-		Table:   b.meta.Table,
-		Columns: cols,
-		Wheres:  b.effectiveWheres(b.trashed),
-		Orders:  b.orders,
-		Limit:   b.limit,
-		Offset:  b.offset,
+		Table:      b.meta.Table,
+		Columns:    cols,
+		Aggregates: b.aggSelects,
+		Wheres:     b.effectiveWheres(b.trashed),
+		Orders:     b.orders,
+		Limit:      b.limit,
+		Offset:     b.offset,
 	}
 }
 
