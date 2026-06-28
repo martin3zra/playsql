@@ -312,7 +312,58 @@ func TestIntegration(t *testing.T) {
 			runExistenceSuite(t, db)
 			runSubquerySuite(t, db)
 			runMorphSuite(t, db)
+			runPivotSuite(t, db)
 		})
+	}
+}
+
+// runPivotSuite exercises Attach/Detach/Sync on the it_widgets <-> it_tags
+// many-to-many, against a live database, using the untagged widget "b".
+func runPivotSuite(t *testing.T, db *playsql.DB) {
+	ctx := context.Background()
+
+	var wb itWidget
+	if err := db.Model(&itWidget{}).WhereEq("name", "b").First(ctx, &wb); err != nil {
+		t.Fatalf("find widget b: %v", err)
+	}
+	x := &itTag{Name: "x"}
+	y := &itTag{Name: "y"}
+	for _, tag := range []*itTag{x, y} {
+		if err := db.Insert(ctx, tag); err != nil {
+			t.Fatalf("insert tag: %v", err)
+		}
+	}
+	holder := &itWidget{ID: wb.ID}
+
+	tagsOf := func() map[string]bool {
+		var w itWidget
+		if err := db.Model(&itWidget{}).With("Tags").Find(ctx, &w, wb.ID); err != nil {
+			t.Fatalf("load tags: %v", err)
+		}
+		m := map[string]bool{}
+		for _, tg := range w.Tags {
+			m[tg.Name] = true
+		}
+		return m
+	}
+
+	if err := db.Attach(ctx, holder, "Tags", x.ID, y.ID); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	if m := tagsOf(); len(m) != 2 || !m["x"] || !m["y"] {
+		t.Fatalf("after attach: %v, want x+y", m)
+	}
+	if err := db.Detach(ctx, holder, "Tags", x.ID); err != nil {
+		t.Fatalf("detach: %v", err)
+	}
+	if m := tagsOf(); len(m) != 1 || !m["y"] {
+		t.Fatalf("after detach: %v, want [y]", m)
+	}
+	if _, err := db.Sync(ctx, holder, "Tags", []any{x.ID}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if m := tagsOf(); len(m) != 1 || !m["x"] {
+		t.Fatalf("after sync: %v, want [x]", m)
 	}
 }
 

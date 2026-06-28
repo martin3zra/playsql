@@ -330,6 +330,29 @@ db.Model(&Post{}).With("Tags").Get(ctx, &posts)  // post.Tags
 db.Model(&Tag{}).With("Posts").Get(ctx, &tags)   // tag.Posts (only post-typed rows)
 ```
 
+### Managing pivots (attach / detach / sync)
+
+Write the join table of a `belongsToMany`/`morphToMany` relation without raw SQL.
+The pivot is resolved from the parent model and relation name; morph relations
+write/filter the `_type` column automatically.
+
+```go
+db.Attach(ctx, &user, "Roles", 1, 2, 3)                 // insert pivot rows
+db.AttachWith(ctx, &user, "Roles", 1,                   // + pivot column values
+    map[string]any{"assigned_by": "admin"})
+db.Detach(ctx, &user, "Roles", 1)                       // remove some
+db.Detach(ctx, &user, "Roles")                          // remove all
+
+db.Sync(ctx, &user, "Roles", []any{2, 3})               // make the set exactly {2,3}
+db.SyncWithoutDetaching(ctx, &user, "Roles", []any{4})  // add missing, keep rest
+db.Toggle(ctx, &user, "Roles", []any{2, 3})             // flip membership
+db.UpdatePivot(ctx, &user, "Roles", 1,                  // update pivot columns
+    map[string]any{"assigned_by": "system"})
+```
+
+`Sync` returns which ids it attached/detached. `Sync`/`Toggle` issue several
+statements — wrap the call in `db.Tx` if you need atomicity.
+
 ### Filtering by relationship existence
 
 Limit parents by whether a related row exists — compiled as a correlated
