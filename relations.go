@@ -123,6 +123,44 @@ func (b *Builder) loadRelation(ctx context.Context, parents []reflect.Value, par
 			}
 		}
 
+	case metadata.MorphOne, metadata.MorphMany:
+		// parent[localKey] === child[morphId] AND child[morphType] === parent alias
+		idCol, typeCol, localKey, typeVal := metadata.ResolveMorphKeys(parentMeta, rel)
+		parentKeyIdx, ok := parentMeta.FieldIndexByColumn(localKey)
+		if !ok {
+			return fmt.Errorf("playsql: relation %q: local key column %q not found", rel.Name, localKey)
+		}
+		childIDIdx, ok := relatedMeta.FieldIndexByColumn(idCol)
+		if !ok {
+			return fmt.Errorf("playsql: relation %q: morph id column %q not found on %s", rel.Name, idCol, relatedMeta.StructName)
+		}
+
+		children, err := b.queryRelated(ctx, rel.RelatedType, idCol, distinctKeys(parents, parentKeyIdx), func(rb *Builder) {
+			rb.WhereEq(typeCol, typeVal)
+			if constraint != nil {
+				constraint(rb)
+			}
+		})
+		if err != nil {
+			return err
+		}
+
+		groups := map[any][]reflect.Value{}
+		for j := 0; j < children.Len(); j++ {
+			c := children.Index(j)
+			k := c.Field(childIDIdx).Interface()
+			groups[k] = append(groups[k], c)
+		}
+
+		kind := metadata.HasMany
+		if rel.Kind == metadata.MorphOne {
+			kind = metadata.HasOne
+		}
+		for _, p := range parents {
+			matches := groups[p.Field(parentKeyIdx).Interface()]
+			assignChildren(p.Field(rel.FieldIndex), matches, kind)
+		}
+
 	case metadata.BelongsToMany:
 		return b.loadBelongsToMany(ctx, parents, parentMeta, rel, relatedMeta, constraint)
 

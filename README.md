@@ -243,8 +243,40 @@ db.Model(&Blog{}).WithConstraint("Comments", func(q *playsql.Builder) {
 ```
 
 Kinds: `hasOne`, `hasMany`, `belongsTo`, `belongsToMany` (with `withPivot`),
-`hasOneThrough`, `hasManyThrough`. Keys follow Eloquent conventions and are
-overridable (`foreignKey=`, `localKey=`, `through=`, …).
+`hasOneThrough`, `hasManyThrough`, `morphOne`, `morphMany`. Keys follow Eloquent
+conventions and are overridable (`foreignKey=`, `localKey=`, `through=`, …).
+
+### Polymorphic relations (morphOne / morphMany)
+
+One child table attached to many different parent types via a `(type, id)` pair
+— comments/images/notes/tags on posts, videos, users, … Declare the
+polymorphic name with `morph=`; the child needs `<name>_id` and `<name>_type`
+columns:
+
+```go
+type Post struct {
+    playsql.Model
+    ID     int64     `db:"id" play:"pk,incrementing"`
+    Images []*Image  `play:"morphMany,morph=imageable"`
+}
+type User struct {
+    playsql.Model
+    Avatar *Image `play:"morphOne,morph=imageable"`
+}
+type Image struct {
+    ID            int64  `db:"id" play:"pk,incrementing"`
+    ImageableID   int64  `db:"imageable_id"`
+    ImageableType string `db:"imageable_type"`
+    URL           string `db:"url"`
+}
+```
+
+The value stored in `imageable_type` defaults to the parent's table name;
+override it by implementing `MorphType() string`. Overrides: `morphId=`,
+`morphType=`, `localKey=`. Eager loading (`With`), existence (`Has`/`WhereHas`/
+`DoesntHave`), aggregates (`WithCount`/…) and deferred loading (`LoadCount`) all
+work like any other relation — the `_type` filter is applied automatically. The
+inverse `morphTo` (a child resolving its varied parent) is not yet supported.
 
 ### Filtering by relationship existence
 

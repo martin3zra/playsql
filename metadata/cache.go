@@ -29,6 +29,8 @@ const (
 	BelongsToMany  RelationKind = "belongsToMany"
 	HasManyThrough RelationKind = "hasManyThrough"
 	HasOneThrough  RelationKind = "hasOneThrough"
+	MorphOne       RelationKind = "morphOne"
+	MorphMany      RelationKind = "morphMany"
 )
 
 // RelationMeta describes one relationship field on a model. Keys may be empty
@@ -52,12 +54,18 @@ type RelationMeta struct {
 	FirstKey     string // parent's foreign key on the through table
 	SecondKey    string // through's foreign key on the far (related) table
 	ThroughKey   string // through table's primary key
+
+	// morphOne/morphMany only:
+	MorphName string // the polymorphic name, e.g. "commentable"
+	MorphID   string // override; default MorphName + "_id"
+	MorphType string // override; default MorphName + "_type"
 }
 
 // ModelMeta is the immutable, parsed description of a model type.
 type ModelMeta struct {
 	StructName      string // Go type name (for convention-based key naming)
 	Table           string
+	MorphAlias      string // value stored in a child's *_type column (default: Table)
 	PrimaryKey      string
 	Incrementing    bool
 	SoftDeletes     bool
@@ -126,6 +134,26 @@ func ResolvePivot(parent *ModelMeta, rel RelationMeta, related *ModelMeta) (pivo
 	parentKey = parent.PrimaryKey
 	relatedKey = related.PrimaryKey
 	return
+}
+
+// ResolveMorphKeys fills in morphOne/morphMany conventions: the related row's
+// id and type columns, the parent's local key, and the type value to match
+// (parent.MorphAlias).
+func ResolveMorphKeys(parent *ModelMeta, rel RelationMeta) (idCol, typeCol, localKey, typeValue string) {
+	idCol = rel.MorphID
+	if idCol == "" {
+		idCol = rel.MorphName + "_id"
+	}
+	typeCol = rel.MorphType
+	if typeCol == "" {
+		typeCol = rel.MorphName + "_type"
+	}
+	localKey = rel.LocalKey
+	if localKey == "" {
+		localKey = parent.PrimaryKey
+	}
+	typeValue = parent.MorphAlias
+	return idCol, typeCol, localKey, typeValue
 }
 
 // ResolveThrough fills in has*Through conventions. ThroughTable is required;

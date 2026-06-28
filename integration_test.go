@@ -34,7 +34,18 @@ type itAuthor struct {
 	Name       string    `db:"name"`
 	Books      []*itBook `play:"hasMany,foreignKey=author_id"`
 	BooksCount int64     `db:"books_count" play:"readonly"` // LoadCount target
+	Notes      []*itNote `play:"morphMany,morph=notable"`
+	NotesCount int64     `db:"notes_count" play:"readonly"` // WithCount target
 }
+
+type itNote struct {
+	ID         int64  `db:"id" play:"pk,incrementing"`
+	NotableID  int64  `db:"notable_id" play:"fillable"`
+	NotableTyp string `db:"notable_type" play:"fillable"`
+	Body       string `db:"body" play:"fillable"`
+}
+
+func (itNote) TableName() string { return "it_notes" }
 
 func (itAuthor) TableName() string { return "it_authors" }
 
@@ -176,6 +187,8 @@ var ddl = map[string][]string{
 		`DROP TABLE IF EXISTS it_destinations`,
 		`CREATE TABLE it_destinations (id BIGSERIAL PRIMARY KEY, name TEXT)`,
 		`CREATE TABLE it_flights (id BIGSERIAL PRIMARY KEY, destination_id BIGINT, name TEXT, arrived_at BIGINT)`,
+		`DROP TABLE IF EXISTS it_notes`,
+		`CREATE TABLE it_notes (id BIGSERIAL PRIMARY KEY, notable_id BIGINT, notable_type TEXT, body TEXT)`,
 	},
 	"mysql": {
 		`DROP TABLE IF EXISTS it_books`,
@@ -202,6 +215,8 @@ var ddl = map[string][]string{
 		`DROP TABLE IF EXISTS it_destinations`,
 		`CREATE TABLE it_destinations (id BIGINT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(191))`,
 		`CREATE TABLE it_flights (id BIGINT AUTO_INCREMENT PRIMARY KEY, destination_id BIGINT, name VARCHAR(191), arrived_at BIGINT)`,
+		`DROP TABLE IF EXISTS it_notes`,
+		`CREATE TABLE it_notes (id BIGINT AUTO_INCREMENT PRIMARY KEY, notable_id BIGINT, notable_type VARCHAR(191), body VARCHAR(191))`,
 	},
 	"mssql": {
 		`DROP TABLE IF EXISTS it_books`,
@@ -228,6 +243,8 @@ var ddl = map[string][]string{
 		`DROP TABLE IF EXISTS it_destinations`,
 		`CREATE TABLE it_destinations (id BIGINT IDENTITY(1,1) PRIMARY KEY, name NVARCHAR(191))`,
 		`CREATE TABLE it_flights (id BIGINT IDENTITY(1,1) PRIMARY KEY, destination_id BIGINT, name NVARCHAR(191), arrived_at BIGINT)`,
+		`DROP TABLE IF EXISTS it_notes`,
+		`CREATE TABLE it_notes (id BIGINT IDENTITY(1,1) PRIMARY KEY, notable_id BIGINT, notable_type NVARCHAR(191), body NVARCHAR(191))`,
 	},
 }
 
@@ -251,7 +268,62 @@ func TestIntegration(t *testing.T) {
 			runRawReturningSuite(t, db, drv.dialect)
 			runExistenceSuite(t, db)
 			runSubquerySuite(t, db)
+			runMorphSuite(t, db)
 		})
+	}
+}
+
+// runMorphSuite exercises morphMany (eager + existence + aggregate) against a
+// live database. Author "A" gets two polymorphic notes (notable_type =
+// "it_authors", the default alias).
+func runMorphSuite(t *testing.T, db *playsql.DB) {
+	ctx := context.Background()
+
+	var a itAuthor
+	if err := db.Model(&itAuthor{}).WhereEq("name", "A").First(ctx, &a); err != nil {
+		t.Fatalf("find author A: %v", err)
+	}
+	for _, body := range []string{"n1", "n2"} {
+		if err := db.Insert(ctx, &itNote{NotableID: a.ID, NotableTyp: "it_authors", Body: body}); err != nil {
+			t.Fatalf("insert note: %v", err)
+		}
+	}
+	// A decoy with a non-matching type must be ignored.
+	if err := db.Insert(ctx, &itNote{NotableID: a.ID, NotableTyp: "other", Body: "x"}); err != nil {
+		t.Fatalf("insert decoy: %v", err)
+	}
+
+	// Eager load.
+	var authors []itAuthor
+	if err := db.Model(&itAuthor{}).WhereEq("name", "A").With("Notes").Get(ctx, &authors); err != nil {
+		t.Fatalf("eager notes: %v", err)
+	}
+	if len(authors) != 1 || len(authors[0].Notes) != 2 {
+		t.Fatalf("Notes = %d, want 2 (decoy excluded)", len(authors[0].Notes))
+	}
+
+	// Existence.
+	has, err := playsql.Query[itAuthor](db).Has("Notes").Get(ctx)
+	if err != nil {
+		t.Fatalf("has notes: %v", err)
+	}
+	if len(has) != 1 || has[0].Name != "A" {
+		t.Fatalf("Has(Notes) = %+v, want [A]", has)
+	}
+
+	// Aggregate.
+	counted, err := playsql.Query[itAuthor](db).WithCount("Notes").Get(ctx)
+	if err != nil {
+		t.Fatalf("withcount notes: %v", err)
+	}
+	for _, au := range counted {
+		want := int64(0)
+		if au.Name == "A" {
+			want = 2
+		}
+		if au.NotesCount != want {
+			t.Fatalf("author %q notes_count = %d, want %d", au.Name, au.NotesCount, want)
+		}
 	}
 }
 

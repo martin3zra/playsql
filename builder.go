@@ -348,6 +348,14 @@ func buildExistsForKind(parentMeta *metadata.ModelMeta, rel metadata.RelationMet
 		}
 		return out, inner, nil
 
+	case metadata.MorphOne, metadata.MorphMany:
+		idCol, typeCol, localKey, typeVal := metadata.ResolveMorphKeys(parentMeta, rel)
+		ex := &grammar.RelationExists{Table: relatedMeta.Table, On: []grammar.WhereClause{
+			{Kind: grammar.WhereColumn, Column: relatedMeta.Table + "." + idCol, Op: "=", Second: parentMeta.Table + "." + localKey},
+			{Kind: grammar.WhereBasic, Boolean: "AND", Column: relatedMeta.Table + "." + typeCol, Op: "=", Value: typeVal},
+		}}
+		return ex, ex, nil
+
 	default:
 		return nil, nil, fmt.Errorf("playsql: relation existence not supported for %s relations", rel.Kind)
 	}
@@ -789,6 +797,13 @@ func aggregateCorrelation(parentMeta *metadata.ModelMeta, rel metadata.RelationM
 				}},
 			},
 		}}, nil
+
+	case metadata.MorphOne, metadata.MorphMany:
+		idCol, typeCol, localKey, typeVal := metadata.ResolveMorphKeys(parentMeta, rel)
+		return relatedMeta.Table, []grammar.WhereClause{
+			{Kind: grammar.WhereColumn, Column: relatedMeta.Table + "." + idCol, Op: "=", Second: parentMeta.Table + "." + localKey},
+			{Kind: grammar.WhereBasic, Boolean: "AND", Column: relatedMeta.Table + "." + typeCol, Op: "=", Value: typeVal},
+		}, nil
 
 	default:
 		return "", nil, fmt.Errorf("playsql: aggregates not supported for %s relations", rel.Kind)

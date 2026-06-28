@@ -18,6 +18,12 @@ type TableNamer interface {
 	TableName() string
 }
 
+// MorphTyper lets a model declare the value stored in a child's polymorphic
+// *_type column. Defaults to the table name when not implemented.
+type MorphTyper interface {
+	MorphType() string
+}
+
 // parse builds a ModelMeta from a struct type via reflection. Config is static:
 // table from the TableNamer interface (else snake(type name)), columns from the
 // `db` tag (else `json`, else snake(field name)), primary key from `play:"pk"`
@@ -30,6 +36,7 @@ func parse(t reflect.Type) *ModelMeta {
 	m := &ModelMeta{
 		StructName:      t.Name(),
 		Table:           tableName(t),
+		MorphAlias:      morphAlias(t),
 		PrimaryKey:      "id",
 		Incrementing:    true,
 		Relations:       make(map[string]RelationMeta),
@@ -141,6 +148,15 @@ func tableName(t reflect.Type) string {
 	return pluralize(snake(t.Name()))
 }
 
+// morphAlias returns the value a model writes into children's *_type columns:
+// MorphType() when implemented, otherwise the table name.
+func morphAlias(t reflect.Type) string {
+	if mt, ok := reflect.New(t).Interface().(MorphTyper); ok {
+		return mt.MorphType()
+	}
+	return tableName(t)
+}
+
 // pluralize applies simple English pluralization rules. For irregular nouns,
 // define TableName() explicitly.
 func pluralize(s string) string {
@@ -208,7 +224,7 @@ func parseRelation(f reflect.StructField, index int) (RelationMeta, bool) {
 	opts := strings.Split(play, ",")
 	kind := RelationKind(strings.TrimSpace(opts[0]))
 	switch kind {
-	case HasMany, HasOne, BelongsTo, BelongsToMany, HasManyThrough, HasOneThrough:
+	case HasMany, HasOne, BelongsTo, BelongsToMany, HasManyThrough, HasOneThrough, MorphOne, MorphMany:
 	default:
 		return RelationMeta{}, false
 	}
@@ -245,6 +261,12 @@ func parseRelation(f reflect.StructField, index int) (RelationMeta, bool) {
 			rel.SecondKey = kv[1]
 		case "throughKey":
 			rel.ThroughKey = kv[1]
+		case "morph":
+			rel.MorphName = kv[1]
+		case "morphId":
+			rel.MorphID = kv[1]
+		case "morphType":
+			rel.MorphType = kv[1]
 		}
 	}
 	return rel, true

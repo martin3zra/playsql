@@ -83,6 +83,9 @@ func (s *session) loadAggregate(ctx context.Context, dest any, fn, relation, col
 	case metadata.BelongsTo:
 		foreignKey, otherKey := metadata.ResolveRelationKeys(parentMeta, rel, relatedMeta)
 		groupCol, parentKeyCol = otherKey, foreignKey
+	case metadata.MorphOne, metadata.MorphMany:
+		idCol, _, localKey, _ := metadata.ResolveMorphKeys(parentMeta, rel)
+		groupCol, parentKeyCol = idCol, localKey
 	default:
 		return fmt.Errorf("playsql: deferred aggregate not supported for %s relations (use the query-time With* methods)", rel.Kind)
 	}
@@ -97,6 +100,13 @@ func (s *session) loadAggregate(ctx context.Context, dest any, fn, relation, col
 	}
 
 	wheres := []grammar.WhereClause{{Kind: grammar.WhereIn, Column: groupCol, Values: keys}}
+	// Morph relations also filter the related rows by the parent's type alias.
+	if rel.Kind == metadata.MorphOne || rel.Kind == metadata.MorphMany {
+		_, typeCol, _, typeVal := metadata.ResolveMorphKeys(parentMeta, rel)
+		wheres = append(wheres, grammar.WhereClause{
+			Kind: grammar.WhereBasic, Boolean: "AND", Column: typeCol, Op: "=", Value: typeVal,
+		})
+	}
 	if relatedMeta.SoftDeletes {
 		wheres = append(wheres, grammar.WhereClause{
 			Kind: grammar.WhereNull, Boolean: "AND", Column: relatedMeta.DeletedAtColumn,
