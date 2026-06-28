@@ -672,6 +672,22 @@ func runRawReturningSuite(t *testing.T, db *playsql.DB, dialect string) {
 	if n != 2 { // avg(5,50,500)=185; 5 and 50 are below
 		t.Fatalf("cte update affected %d, want 2", n)
 	}
+
+	// Bound CTE (WithCTEQuery): the subquery carries a placeholder that must be
+	// renumbered ahead of the SET/WHERE binds. cheap_ids = price < 600 (all);
+	// update those also priced > 40 -> the 50 and 500 widgets.
+	cheapIDs := db.Model(&itWidget{}).Select("id").Where("price", "<", int64(600))
+	bn, err := db.Model(&itWidget{}).
+		WithCTEQuery("cheap_ids", cheapIDs).
+		WhereRaw("id IN (SELECT id FROM cheap_ids)").
+		Where("price", ">", int64(40)).
+		Update(ctx, map[string]any{"cheap": false})
+	if err != nil {
+		t.Fatalf("bound cte update: %v", err)
+	}
+	if bn != 2 {
+		t.Fatalf("bound cte update affected %d, want 2", bn)
+	}
 }
 
 func runSuite(t *testing.T, db *playsql.DB) {

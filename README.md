@@ -172,9 +172,9 @@ rows, _ := playsql.Query[User](db).
     UpdateReturning(ctx, map[string]any{"active": true})
 ```
 
-A `WITH` clause (CTE) can prefix an update — compute an aggregate once, then
-update against it. `WithCTE` adds the CTE; `WhereRaw` references it. Both render
-verbatim and must carry **no** bind parameters; never interpolate untrusted input.
+A `WITH` clause (CTE) can prefix an update — compute something once, then update
+against it. `WithCTE` takes **verbatim, bind-free** SQL; `WhereRaw` references it
+(never interpolate untrusted input):
 
 ```go
 // Mark every product priced below the average as cheap.
@@ -182,6 +182,18 @@ db.Model(&Product{}).
     WithCTE("avg_price", "SELECT AVG(price) AS value FROM products").
     WhereRaw("price < (SELECT value FROM avg_price)").
     Update(ctx, map[string]any{"cheap": true})
+```
+
+`WithCTEQuery` builds the CTE from a sub-query builder instead, so it **can**
+carry bound parameters — their placeholders are renumbered to lead the
+statement:
+
+```go
+cheap := db.Model(&Product{}).Select("id").Where("price", "<", threshold)
+db.Model(&Product{}).
+    WithCTEQuery("cheap", cheap).
+    WhereRaw("id IN (SELECT id FROM cheap)").
+    Update(ctx, map[string]any{"on_sale": true})
 ```
 
 ## Raw queries

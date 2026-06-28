@@ -58,7 +58,8 @@ func (b *Builder) Update(ctx context.Context, data map[string]any) (int64, error
 	}
 
 	wheres := b.effectiveWheres(b.trashed)
-	args := append(vals, whereArgs(wheres)...)
+	// Structured-CTE binds lead, then SET values, then WHERE — matching the SQL.
+	args := append(append(append([]any{}, b.cteArgs...), vals...), whereArgs(wheres)...)
 
 	sqlStr, _ := b.sess.grammar.CompileUpdate(grammar.UpdateStmt{
 		Table:   b.meta.Table,
@@ -99,7 +100,7 @@ func (b *Builder) UpdateReturning(ctx context.Context, data map[string]any, dest
 	}
 
 	wheres := b.effectiveWheres(b.trashed)
-	args := append(vals, whereArgs(wheres)...)
+	args := append(append(append([]any{}, b.cteArgs...), vals...), whereArgs(wheres)...)
 
 	sqlStr, returnsRows := b.sess.grammar.CompileUpdate(grammar.UpdateStmt{
 		Table:     b.meta.Table,

@@ -60,6 +60,26 @@ func TestCompileUpdate_MSSQLOutput(t *testing.T) {
 	}
 }
 
+func TestCompileUpdate_StructuredCTEBinds(t *testing.T) {
+	// A bound CTE subquery ($1) leads, then SET ($2), then WHERE ($3).
+	cte := CompiledQuery{
+		Table:   "orders",
+		Columns: []string{"id"},
+		Wheres:  []WhereClause{{Kind: WhereBasic, Column: "region", Op: "=", Value: "eu"}},
+	}
+	sql, _ := Postgres{}.CompileUpdate(UpdateStmt{
+		Table:   "products",
+		Columns: []string{"on_sale"},
+		CTEs:    []CTE{{Name: "cheap", Query: &cte}},
+		Wheres:  []WhereClause{{Kind: WhereBasic, Column: "active", Op: "=", Value: true}},
+	})
+	want := `WITH "cheap" AS (SELECT "id" FROM "orders" WHERE "region" = $1) ` +
+		`UPDATE "products" SET "on_sale" = $2 WHERE "active" = $3`
+	if sql != want {
+		t.Errorf("sql:\n got: %s\nwant: %s", sql, want)
+	}
+}
+
 func TestCompileUpdate_CTEAndWhereRaw(t *testing.T) {
 	// WITH prefix + a verbatim predicate referencing it; SET binds stay at $1.
 	sql, _ := Postgres{}.CompileUpdate(UpdateStmt{

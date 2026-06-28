@@ -133,12 +133,13 @@ type InsertStmt struct {
 }
 
 // CTE is a common table expression prepended to a statement as
-// WITH <Name> AS (<SQL>). SQL is rendered verbatim and must not carry bind
-// parameters — it sits before the statement's own binds, so embedding
-// placeholders would break contiguous numbering on $-style dialects.
+// WITH <Name> AS (...). Provide either Query (a structured subquery whose binds
+// are renumbered to lead the statement) or SQL (verbatim text, which must carry
+// no bind parameters). Query takes precedence when both are set.
 type CTE struct {
-	Name string
-	SQL  string
+	Name  string
+	SQL   string         // verbatim, bind-free
+	Query *CompiledQuery // structured; binds threaded before the outer statement
 }
 
 // UpdateStmt describes an UPDATE. Set columns first, then Wheres; the grammar
@@ -453,13 +454,15 @@ func compileUpsertMySQL(g Grammar, s UpsertStmt) string {
 // this helper for returns.
 func compileUpdate(g Grammar, s UpdateStmt, kw string) (string, bool) {
 	var sb strings.Builder
-	writeCTEs(g, &sb, s.CTEs)
+
+	// Structured CTE binds lead the statement; thread n through them before SET.
+	n := 0
+	writeCTEs(g, &sb, s.CTEs, &n)
 
 	sb.WriteString("UPDATE ")
 	sb.WriteString(g.Wrap(s.Table))
 	sb.WriteString(" SET ")
 
-	n := 0
 	for i, c := range s.Columns {
 		if i > 0 {
 			sb.WriteString(", ")
@@ -488,10 +491,14 @@ func compileUpdate(g Grammar, s UpdateStmt, kw string) (string, bool) {
 
 // writeCTEs emits a "WITH name AS (sql), ..." prefix (with a trailing space)
 // when ctes is non-empty. The SQL bodies are verbatim; see CTE.
-func writeCTEs(g Grammar, sb *strings.Builder, ctes []CTE) {
+// writeCTEs emits the "WITH a AS (...), b AS (...) " prefix, threading n through
+// any structured CTE subqueries so their placeholders lead the statement. It
+// returns the bound args from those subqueries in emission order.
+func writeCTEs(g Grammar, sb *strings.Builder, ctes []CTE, n *int) []any {
 	if len(ctes) == 0 {
-		return
+		return nil
 	}
+	var args []any
 	sb.WriteString("WITH ")
 	for i, c := range ctes {
 		if i > 0 {
@@ -499,10 +506,15 @@ func writeCTEs(g Grammar, sb *strings.Builder, ctes []CTE) {
 		}
 		sb.WriteString(g.Wrap(c.Name))
 		sb.WriteString(" AS (")
-		sb.WriteString(c.SQL)
+		if c.Query != nil {
+			args = append(args, writeNestedSelect(g, sb, *c.Query, n)...)
+		} else {
+			sb.WriteString(c.SQL)
+		}
 		sb.WriteByte(')')
 	}
 	sb.WriteByte(' ')
+	return args
 }
 
 // compileWheres assembles a list of predicates, threading a running 1-based

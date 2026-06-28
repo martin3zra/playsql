@@ -328,6 +328,12 @@ func (t *TypedBuilder[T]) WithCTE(name, rawSQL string) *TypedBuilder[T] {
 	return t
 }
 
+// WithCTEQuery prepends a CTE built from a sub-query (may carry binds).
+func (t *TypedBuilder[T]) WithCTEQuery(name string, sub *Builder) *TypedBuilder[T] {
+	t.b.WithCTEQuery(name, sub)
+	return t
+}
+
 // UpdateReturning mass-assigns data and returns the affected rows as a []T.
 // Requires Returning(...) columns and a dialect with RETURNING/OUTPUT.
 func (t *TypedBuilder[T]) UpdateReturning(ctx context.Context, data map[string]any) ([]T, error) {

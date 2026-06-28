@@ -39,6 +39,7 @@ type Builder struct {
 	orders      []grammar.OrderClause
 	withs       []withClause
 	ctes        []grammar.CTE             // WITH prefixes for Update/UpdateReturning
+	cteArgs     []any                     // bound args from structured CTE subqueries
 	returning   []string                  // columns for UpdateReturning
 	aggSelects  []grammar.AggregateSelect // withCount/withSum/… extra columns
 	subSelects  []grammar.SubSelectColumn // AddSelect correlated subquery columns
@@ -628,6 +629,29 @@ func (b *Builder) Returning(columns ...string) *Builder {
 //		Update(ctx, map[string]any{"cheap": true})
 func (b *Builder) WithCTE(name, rawSQL string) *Builder {
 	b.ctes = append(b.ctes, grammar.CTE{Name: name, SQL: rawSQL})
+	return b
+}
+
+// WithCTEQuery prepends a CTE built from a sub-query (a builder for any table),
+// unlike WithCTE it may carry bound parameters — the grammar renumbers the
+// subquery's placeholders to lead the statement.
+//
+//	cheap := db.Model(&Product{}).Select("id").Where("price", "<", threshold)
+//	db.Model(&Product{}).
+//		WithCTEQuery("cheap", cheap).
+//		WhereRaw("id IN (SELECT id FROM cheap)").
+//		Update(ctx, map[string]any{"on_sale": true})
+func (b *Builder) WithCTEQuery(name string, sub *Builder) *Builder {
+	if b.err != nil {
+		return b
+	}
+	if sub == nil || sub.err != nil {
+		return b.fail(fmt.Errorf("playsql: WithCTEQuery(%q): invalid subquery", name))
+	}
+	cq := sub.compiled()
+	_, args := b.sess.grammar.CompileSelect(cq) // args in placeholder order
+	b.ctes = append(b.ctes, grammar.CTE{Name: name, Query: &cq})
+	b.cteArgs = append(b.cteArgs, args...)
 	return b
 }
 

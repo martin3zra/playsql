@@ -49,13 +49,14 @@ func (g MSSQL) CompileUpdate(s UpdateStmt) (string, bool) {
 	}
 
 	var sb strings.Builder
-	writeCTEs(g, &sb, s.CTEs)
+
+	n := 0
+	writeCTEs(g, &sb, s.CTEs, &n)
 
 	sb.WriteString("UPDATE ")
 	sb.WriteString(g.Wrap(s.Table))
 	sb.WriteString(" SET ")
 
-	n := 0
 	for i, c := range s.Columns {
 		if i > 0 {
 			sb.WriteString(", ")
