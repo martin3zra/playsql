@@ -820,9 +820,15 @@ func runRawReturningSuite(t *testing.T, db *playsql.DB, dialect string) {
 		t.Fatalf("cte update affected %d, want 2", n)
 	}
 
+	// Set a known state first: MySQL's RowsAffected counts changed (not matched)
+	// rows, so both target rows must actually flip below for a portable count.
+	if _, err := db.Model(&itWidget{}).Update(ctx, map[string]any{"cheap": true}); err != nil {
+		t.Fatalf("reset cheap true: %v", err)
+	}
+
 	// Bound CTE (WithCTEQuery): the subquery carries a placeholder that must be
 	// renumbered ahead of the SET/WHERE binds. cheap_ids = price < 600 (all);
-	// update those also priced > 40 -> the 50 and 500 widgets.
+	// update those also priced > 40 -> the 50 and 500 widgets (both flip to false).
 	cheapIDs := db.Model(&itWidget{}).Select("id").Where("price", "<", int64(600))
 	bn, err := db.Model(&itWidget{}).
 		WithCTEQuery("cheap_ids", cheapIDs).
