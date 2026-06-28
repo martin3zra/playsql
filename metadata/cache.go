@@ -31,6 +31,7 @@ const (
 	HasOneThrough  RelationKind = "hasOneThrough"
 	MorphOne       RelationKind = "morphOne"
 	MorphMany      RelationKind = "morphMany"
+	MorphTo        RelationKind = "morphTo"
 )
 
 // RelationMeta describes one relationship field on a model. Keys may be empty

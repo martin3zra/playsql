@@ -53,6 +53,10 @@ func (b *Builder) loadPath(ctx context.Context, parents []reflect.Value, parentM
 	if last {
 		return nil
 	}
+	// morphTo has no single related type, so it cannot be an intermediate segment.
+	if rel.Kind == metadata.MorphTo {
+		return fmt.Errorf("playsql: morphTo relation %q cannot have nested segments %v", name, segments[1:])
+	}
 
 	children := collectChildren(parents, rel.FieldIndex)
 	if len(children) == 0 {
@@ -63,6 +67,11 @@ func (b *Builder) loadPath(ctx context.Context, parents []reflect.Value, parentM
 }
 
 func (b *Builder) loadRelation(ctx context.Context, parents []reflect.Value, parentMeta *metadata.ModelMeta, rel metadata.RelationMeta, constraint func(*Builder)) error {
+	// morphTo has no single related type (RelatedType is nil) — resolve it first.
+	if rel.Kind == metadata.MorphTo {
+		return b.loadMorphTo(ctx, parents, parentMeta, rel, constraint)
+	}
+
 	relatedMeta := metadata.For(reflect.New(rel.RelatedType).Interface())
 	foreignKey, otherKey := metadata.ResolveRelationKeys(parentMeta, rel, relatedMeta)
 
@@ -168,6 +177,88 @@ func (b *Builder) loadRelation(ctx context.Context, parents []reflect.Value, par
 		return b.loadThrough(ctx, parents, parentMeta, rel, relatedMeta, constraint)
 	}
 
+	return nil
+}
+
+// MorphOwners maps each polymorphic type value to a model instance of that owner
+// type. A model holding a morphTo field must implement it so the loader can
+// resolve a child's *_type string to a concrete model — a per-model alternative
+// to a global morph registry.
+//
+//	func (Image) MorphOwners() map[string]any {
+//	    return map[string]any{"posts": &Post{}, "videos": &Video{}}
+//	}
+type MorphOwners interface {
+	MorphOwners() map[string]any
+}
+
+// loadMorphTo resolves a morphTo relation: it groups the holders by their
+// *_type value, and for each type queries the corresponding owner table (looked
+// up via MorphOwners) by the *_id values, assigning a *Owner into the holder's
+// interface field. One query per distinct type, no N+1.
+func (b *Builder) loadMorphTo(ctx context.Context, holders []reflect.Value, holderMeta *metadata.ModelMeta, rel metadata.RelationMeta, constraint func(*Builder)) error {
+	idCol := rel.MorphID
+	if idCol == "" {
+		idCol = rel.MorphName + "_id"
+	}
+	typeCol := rel.MorphType
+	if typeCol == "" {
+		typeCol = rel.MorphName + "_type"
+	}
+	idIdx, ok := holderMeta.FieldIndexByColumn(idCol)
+	if !ok {
+		return fmt.Errorf("playsql: relation %q: morph id column %q not found on %s", rel.Name, idCol, holderMeta.StructName)
+	}
+	typeIdx, ok := holderMeta.FieldIndexByColumn(typeCol)
+	if !ok {
+		return fmt.Errorf("playsql: relation %q: morph type column %q not found on %s", rel.Name, typeCol, holderMeta.StructName)
+	}
+
+	owner, ok := reflect.New(holders[0].Type()).Interface().(MorphOwners)
+	if !ok {
+		return fmt.Errorf("playsql: relation %q: %s must implement MorphOwners for morphTo", rel.Name, holderMeta.StructName)
+	}
+	ownersMap := owner.MorphOwners()
+
+	// Bucket holders by the polymorphic type value.
+	byType := map[string][]reflect.Value{}
+	for _, h := range holders {
+		byType[fmt.Sprint(h.Field(typeIdx).Interface())] = append(byType[fmt.Sprint(h.Field(typeIdx).Interface())], h)
+	}
+
+	for typeVal, group := range byType {
+		model, ok := ownersMap[typeVal]
+		if !ok {
+			continue // unmapped type -> leave the field nil
+		}
+		ownerMeta := metadata.For(model)
+		ownerType := reflect.TypeOf(model)
+		for ownerType.Kind() == reflect.Ptr {
+			ownerType = ownerType.Elem()
+		}
+		pkIdx, ok := ownerMeta.FieldIndexByColumn(ownerMeta.PrimaryKey)
+		if !ok {
+			return fmt.Errorf("playsql: morphTo owner %s has no primary key column %q", ownerMeta.StructName, ownerMeta.PrimaryKey)
+		}
+
+		owners, err := b.queryRelated(ctx, ownerType, ownerMeta.PrimaryKey, distinctKeys(group, idIdx), constraint)
+		if err != nil {
+			return err
+		}
+		index := map[any]reflect.Value{}
+		for j := 0; j < owners.Len(); j++ {
+			o := owners.Index(j)
+			index[o.Field(pkIdx).Interface()] = o
+		}
+		for _, h := range group {
+			if o, ok := index[h.Field(idIdx).Interface()]; ok {
+				field := h.Field(rel.FieldIndex)
+				if field.CanSet() {
+					field.Set(o.Addr()) // assign *Owner into the interface field
+				}
+			}
+		}
+	}
 	return nil
 }
 

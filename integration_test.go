@@ -47,6 +47,22 @@ type itNote struct {
 
 func (itNote) TableName() string { return "it_notes" }
 
+// itLog holds a morphTo: each log belongs to an author or a widget.
+type itLog struct {
+	playsql.Model
+	ID           int64  `db:"id" play:"pk,incrementing"`
+	LoggableID   int64  `db:"loggable_id" play:"fillable"`
+	LoggableType string `db:"loggable_type" play:"fillable"`
+	Msg          string `db:"msg" play:"fillable"`
+	Loggable     any    `play:"morphTo,morph=loggable"`
+}
+
+func (itLog) TableName() string { return "it_logs" }
+
+func (itLog) MorphOwners() map[string]any {
+	return map[string]any{"it_authors": &itAuthor{}, "it_widgets": &itWidget{}}
+}
+
 func (itAuthor) TableName() string { return "it_authors" }
 
 type itBook struct {
@@ -189,6 +205,8 @@ var ddl = map[string][]string{
 		`CREATE TABLE it_flights (id BIGSERIAL PRIMARY KEY, destination_id BIGINT, name TEXT, arrived_at BIGINT)`,
 		`DROP TABLE IF EXISTS it_notes`,
 		`CREATE TABLE it_notes (id BIGSERIAL PRIMARY KEY, notable_id BIGINT, notable_type TEXT, body TEXT)`,
+		`DROP TABLE IF EXISTS it_logs`,
+		`CREATE TABLE it_logs (id BIGSERIAL PRIMARY KEY, loggable_id BIGINT, loggable_type TEXT, msg TEXT)`,
 	},
 	"mysql": {
 		`DROP TABLE IF EXISTS it_books`,
@@ -217,6 +235,8 @@ var ddl = map[string][]string{
 		`CREATE TABLE it_flights (id BIGINT AUTO_INCREMENT PRIMARY KEY, destination_id BIGINT, name VARCHAR(191), arrived_at BIGINT)`,
 		`DROP TABLE IF EXISTS it_notes`,
 		`CREATE TABLE it_notes (id BIGINT AUTO_INCREMENT PRIMARY KEY, notable_id BIGINT, notable_type VARCHAR(191), body VARCHAR(191))`,
+		`DROP TABLE IF EXISTS it_logs`,
+		`CREATE TABLE it_logs (id BIGINT AUTO_INCREMENT PRIMARY KEY, loggable_id BIGINT, loggable_type VARCHAR(191), msg VARCHAR(191))`,
 	},
 	"mssql": {
 		`DROP TABLE IF EXISTS it_books`,
@@ -245,6 +265,8 @@ var ddl = map[string][]string{
 		`CREATE TABLE it_flights (id BIGINT IDENTITY(1,1) PRIMARY KEY, destination_id BIGINT, name NVARCHAR(191), arrived_at BIGINT)`,
 		`DROP TABLE IF EXISTS it_notes`,
 		`CREATE TABLE it_notes (id BIGINT IDENTITY(1,1) PRIMARY KEY, notable_id BIGINT, notable_type NVARCHAR(191), body NVARCHAR(191))`,
+		`DROP TABLE IF EXISTS it_logs`,
+		`CREATE TABLE it_logs (id BIGINT IDENTITY(1,1) PRIMARY KEY, loggable_id BIGINT, loggable_type NVARCHAR(191), msg NVARCHAR(191))`,
 	},
 }
 
@@ -324,6 +346,31 @@ func runMorphSuite(t *testing.T, db *playsql.DB) {
 		if au.NotesCount != want {
 			t.Fatalf("author %q notes_count = %d, want %d", au.Name, au.NotesCount, want)
 		}
+	}
+
+	// morphTo: logs that belong to an author or a widget, resolved via MorphOwners.
+	var wa itWidget
+	if err := db.Model(&itWidget{}).WhereEq("name", "a").First(ctx, &wa); err != nil {
+		t.Fatalf("find widget a: %v", err)
+	}
+	if err := db.Insert(ctx, &itLog{LoggableID: a.ID, LoggableType: "it_authors", Msg: "m1"}); err != nil {
+		t.Fatalf("insert log: %v", err)
+	}
+	if err := db.Insert(ctx, &itLog{LoggableID: wa.ID, LoggableType: "it_widgets", Msg: "m2"}); err != nil {
+		t.Fatalf("insert log: %v", err)
+	}
+	logs, err := playsql.Query[itLog](db).With("Loggable").OrderBy("id", playsql.Asc).Get(ctx)
+	if err != nil {
+		t.Fatalf("morphto eager: %v", err)
+	}
+	if len(logs) != 2 {
+		t.Fatalf("want 2 logs, got %d", len(logs))
+	}
+	if au, ok := logs[0].Loggable.(*itAuthor); !ok || au.Name != "A" {
+		t.Fatalf("log0 owner = %#v, want *itAuthor{A}", logs[0].Loggable)
+	}
+	if w, ok := logs[1].Loggable.(*itWidget); !ok || w.Name != "a" {
+		t.Fatalf("log1 owner = %#v, want *itWidget{a}", logs[1].Loggable)
 	}
 }
 

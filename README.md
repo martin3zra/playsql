@@ -287,8 +287,29 @@ The value stored in `imageable_type` defaults to the parent's table name;
 override it by implementing `MorphType() string`. Overrides: `morphId=`,
 `morphType=`, `localKey=`. Eager loading (`With`), existence (`Has`/`WhereHas`/
 `DoesntHave`), aggregates (`WithCount`/…) and deferred loading (`LoadCount`) all
-work like any other relation — the `_type` filter is applied automatically. The
-inverse `morphTo` (a child resolving its varied parent) is not yet supported.
+work like any other relation — the `_type` filter is applied automatically.
+
+The inverse, **`morphTo`** (a child resolving its varied parent), uses an
+interface field plus a per-model `MorphOwners` map (no global registry):
+
+```go
+type Comment struct {
+    playsql.Model
+    ID              int64  `db:"id" play:"pk,incrementing"`
+    CommentableID   int64  `db:"commentable_id"`
+    CommentableType string `db:"commentable_type"`
+    Commentable     any    `play:"morphTo,morph=commentable"`
+}
+func (Comment) MorphOwners() map[string]any {
+    return map[string]any{"posts": &Post{}, "videos": &Video{}}
+}
+
+db.Model(&Comment{}).With("Commentable").Get(ctx, &comments)
+// comment.Commentable is a *Post or *Video (one query per distinct type)
+```
+
+`morphTo` supports eager loading; unmapped type values leave the field nil, and
+it can't be a nested path segment. `morphToMany` is not yet supported.
 
 ### Filtering by relationship existence
 

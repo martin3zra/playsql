@@ -103,8 +103,9 @@ func parse(t reflect.Type) *ModelMeta {
 		}
 
 		// A struct/slice/pointer field is a relation UNLESS it has a cast, which
-		// reclassifies it as a (JSON-encoded) column.
-		if cast == "" && isRelationField(f.Type) {
+		// reclassifies it as a (JSON-encoded) column. A morphTo field is an
+		// interface, recognized by its tag rather than its type.
+		if cast == "" && (isRelationField(f.Type) || isMorphToTag(f)) {
 			if rel, ok := parseRelation(f, i); ok {
 				m.Relations[f.Name] = rel
 			}
@@ -224,16 +225,20 @@ func parseRelation(f reflect.StructField, index int) (RelationMeta, bool) {
 	opts := strings.Split(play, ",")
 	kind := RelationKind(strings.TrimSpace(opts[0]))
 	switch kind {
-	case HasMany, HasOne, BelongsTo, BelongsToMany, HasManyThrough, HasOneThrough, MorphOne, MorphMany:
+	case HasMany, HasOne, BelongsTo, BelongsToMany, HasManyThrough, HasOneThrough, MorphOne, MorphMany, MorphTo:
 	default:
 		return RelationMeta{}, false
 	}
 
 	rel := RelationMeta{
-		Name:        f.Name,
-		Kind:        kind,
-		FieldIndex:  index,
-		RelatedType: relatedType(f.Type),
+		Name:       f.Name,
+		Kind:       kind,
+		FieldIndex: index,
+	}
+	// morphTo is polymorphic: the related type is resolved at load time from the
+	// holder's MorphOwners map, not from the (interface) field type.
+	if kind != MorphTo {
+		rel.RelatedType = relatedType(f.Type)
 	}
 	for _, opt := range opts[1:] {
 		kv := strings.SplitN(strings.TrimSpace(opt), "=", 2)
@@ -269,7 +274,20 @@ func parseRelation(f reflect.StructField, index int) (RelationMeta, bool) {
 			rel.MorphType = kv[1]
 		}
 	}
+	if kind == MorphTo && rel.MorphName == "" {
+		rel.MorphName = snake(f.Name) // field "Imageable" -> "imageable"
+	}
 	return rel, true
+}
+
+// isMorphToTag reports whether a field's play tag declares a morphTo relation
+// (its Go type is an interface, so type-based detection does not apply).
+func isMorphToTag(f reflect.StructField) bool {
+	play := f.Tag.Get("play")
+	if play == "" {
+		return false
+	}
+	return RelationKind(strings.TrimSpace(strings.SplitN(play, ",", 2)[0])) == MorphTo
 }
 
 // relatedType unwraps a relation field type to the related struct type:
