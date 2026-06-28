@@ -88,14 +88,23 @@ func (itProfile) TableName() string { return "it_profiles" }
 
 type itWidget struct {
 	playsql.Model
-	ID    int64    `db:"id" play:"pk,incrementing"`
-	Name  string   `db:"name" play:"fillable"`
-	Price int64    `db:"price" play:"fillable"`
-	Cheap bool     `db:"cheap" play:"fillable"`
-	Tags  []*itTag `play:"belongsToMany,pivot=it_widget_tag"`
+	ID     int64      `db:"id" play:"pk,incrementing"`
+	Name   string     `db:"name" play:"fillable"`
+	Price  int64      `db:"price" play:"fillable"`
+	Cheap  bool       `db:"cheap" play:"fillable"`
+	Tags   []*itTag   `play:"belongsToMany,pivot=it_widget_tag"`
+	Labels []*itLabel `play:"morphToMany,morph=labelable,pivot=it_labelables"`
 
 	TagsCount int64 `db:"tags_count" play:"readonly"` // WithCount target (Strategy A)
 }
+
+type itLabel struct {
+	playsql.Model
+	ID   int64  `db:"id" play:"pk,incrementing"`
+	Name string `db:"name" play:"fillable"`
+}
+
+func (itLabel) TableName() string { return "it_labels" }
 
 func (itWidget) TableName() string { return "it_widgets" }
 
@@ -193,6 +202,10 @@ var ddl = map[string][]string{
 		`DROP TABLE IF EXISTS it_tags`,
 		`CREATE TABLE it_tags (id BIGSERIAL PRIMARY KEY, name TEXT)`,
 		`CREATE TABLE it_widget_tag (it_widget_id BIGINT, it_tag_id BIGINT)`,
+		`DROP TABLE IF EXISTS it_labelables`,
+		`DROP TABLE IF EXISTS it_labels`,
+		`CREATE TABLE it_labels (id BIGSERIAL PRIMARY KEY, name TEXT)`,
+		`CREATE TABLE it_labelables (it_label_id BIGINT, labelable_id BIGINT, labelable_type TEXT)`,
 		`DROP TABLE IF EXISTS it_articles`,
 		`DROP TABLE IF EXISTS it_writers`,
 		`DROP TABLE IF EXISTS it_regions`,
@@ -223,6 +236,10 @@ var ddl = map[string][]string{
 		`DROP TABLE IF EXISTS it_tags`,
 		`CREATE TABLE it_tags (id BIGINT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(191))`,
 		`CREATE TABLE it_widget_tag (it_widget_id BIGINT, it_tag_id BIGINT)`,
+		`DROP TABLE IF EXISTS it_labelables`,
+		`DROP TABLE IF EXISTS it_labels`,
+		`CREATE TABLE it_labels (id BIGINT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(191))`,
+		`CREATE TABLE it_labelables (it_label_id BIGINT, labelable_id BIGINT, labelable_type VARCHAR(191))`,
 		`DROP TABLE IF EXISTS it_articles`,
 		`DROP TABLE IF EXISTS it_writers`,
 		`DROP TABLE IF EXISTS it_regions`,
@@ -253,6 +270,10 @@ var ddl = map[string][]string{
 		`DROP TABLE IF EXISTS it_tags`,
 		`CREATE TABLE it_tags (id BIGINT IDENTITY(1,1) PRIMARY KEY, name NVARCHAR(191))`,
 		`CREATE TABLE it_widget_tag (it_widget_id BIGINT, it_tag_id BIGINT)`,
+		`DROP TABLE IF EXISTS it_labelables`,
+		`DROP TABLE IF EXISTS it_labels`,
+		`CREATE TABLE it_labels (id BIGINT IDENTITY(1,1) PRIMARY KEY, name NVARCHAR(191))`,
+		`CREATE TABLE it_labelables (it_label_id BIGINT, labelable_id BIGINT, labelable_type NVARCHAR(191))`,
 		`DROP TABLE IF EXISTS it_articles`,
 		`DROP TABLE IF EXISTS it_writers`,
 		`DROP TABLE IF EXISTS it_regions`,
@@ -371,6 +392,34 @@ func runMorphSuite(t *testing.T, db *playsql.DB) {
 	}
 	if w, ok := logs[1].Loggable.(*itWidget); !ok || w.Name != "a" {
 		t.Fatalf("log1 owner = %#v, want *itWidget{a}", logs[1].Loggable)
+	}
+
+	// morphToMany: label "hot" attached to widget "a" (and a decoy region row
+	// that must be ignored by the labelable_type filter).
+	if err := db.Insert(ctx, &itLabel{Name: "hot"}); err != nil {
+		t.Fatalf("insert label: %v", err)
+	}
+	var hot itLabel
+	if err := db.Model(&itLabel{}).WhereEq("name", "hot").First(ctx, &hot); err != nil {
+		t.Fatalf("find label: %v", err)
+	}
+	if _, err := db.Exec(ctx, fmt.Sprintf(
+		"INSERT INTO it_labelables (it_label_id, labelable_id, labelable_type) VALUES (%d, %d, 'it_widgets'), (%d, 999, 'it_regions')",
+		hot.ID, wa.ID, hot.ID)); err != nil {
+		t.Fatalf("link labelable: %v", err)
+	}
+	labeled, err := playsql.Query[itWidget](db).With("Labels").Get(ctx)
+	if err != nil {
+		t.Fatalf("morphtomany eager: %v", err)
+	}
+	for _, w := range labeled {
+		want := 0
+		if w.Name == "a" {
+			want = 1
+		}
+		if len(w.Labels) != want {
+			t.Fatalf("widget %q labels = %d, want %d", w.Name, len(w.Labels), want)
+		}
 	}
 }
 

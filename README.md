@@ -309,7 +309,26 @@ db.Model(&Comment{}).With("Commentable").Get(ctx, &comments)
 ```
 
 `morphTo` supports eager loading; unmapped type values leave the field nil, and
-it can't be a nested path segment. `morphToMany` is not yet supported.
+it can't be a nested path segment.
+
+**`morphToMany`** is a many-to-many through a polymorphic pivot (e.g. tags shared
+across posts and videos via `taggables(tag_id, taggable_id, taggable_type)`).
+Declare the owning side with `morphToMany` and the inverse with `morphedByMany`;
+both filter the pivot by the morphable side's type automatically:
+
+```go
+type Post struct {
+    playsql.Model
+    Tags []*Tag `play:"morphToMany,morph=taggable,pivot=taggables"`
+}
+type Tag struct {
+    playsql.Model
+    Posts []*Post `play:"morphedByMany,morph=taggable,pivot=taggables"`
+}
+
+db.Model(&Post{}).With("Tags").Get(ctx, &posts)  // post.Tags
+db.Model(&Tag{}).With("Posts").Get(ctx, &tags)   // tag.Posts (only post-typed rows)
+```
 
 ### Filtering by relationship existence
 

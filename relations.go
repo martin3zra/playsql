@@ -173,6 +173,9 @@ func (b *Builder) loadRelation(ctx context.Context, parents []reflect.Value, par
 	case metadata.BelongsToMany:
 		return b.loadBelongsToMany(ctx, parents, parentMeta, rel, relatedMeta, constraint)
 
+	case metadata.MorphToMany, metadata.MorphedByMany:
+		return b.loadMorphToMany(ctx, parents, parentMeta, rel, relatedMeta, constraint)
+
 	case metadata.HasManyThrough, metadata.HasOneThrough:
 		return b.loadThrough(ctx, parents, parentMeta, rel, relatedMeta, constraint)
 	}
@@ -281,7 +284,7 @@ func (b *Builder) loadThrough(ctx context.Context, parents []reflect.Value, pare
 	}
 
 	// Step 1: through rows (firstKey, throughKey) for the parents' local keys.
-	pairs, err := b.queryPivot(ctx, throughTable, firstKey, throughKey, nil, distinctKeys(parents, parentLocalIdx))
+	pairs, err := b.queryPivot(ctx, throughTable, firstKey, throughKey, nil, distinctKeys(parents, parentLocalIdx), "", "")
 	if err != nil {
 		return err
 	}
@@ -327,7 +330,19 @@ func (b *Builder) loadThrough(ctx context.Context, parents []reflect.Value, pare
 // parents (already loaded) -> pivot rows -> related rows.
 func (b *Builder) loadBelongsToMany(ctx context.Context, parents []reflect.Value, parentMeta *metadata.ModelMeta, rel metadata.RelationMeta, relatedMeta *metadata.ModelMeta, constraint func(*Builder)) error {
 	pivotTable, fpk, rpk, parentKey, relatedKey := metadata.ResolvePivot(parentMeta, rel, relatedMeta)
+	return b.loadPivotRelation(ctx, parents, parentMeta, rel, relatedMeta, constraint, pivotTable, fpk, rpk, parentKey, relatedKey, "", "")
+}
 
+// loadMorphToMany handles morphToMany / morphedByMany: belongsToMany through a
+// polymorphic pivot, filtered by the morphable side's type value.
+func (b *Builder) loadMorphToMany(ctx context.Context, parents []reflect.Value, parentMeta *metadata.ModelMeta, rel metadata.RelationMeta, relatedMeta *metadata.ModelMeta, constraint func(*Builder)) error {
+	pivotTable, fpk, rpk, parentKey, relatedKey, typeCol, typeVal := metadata.ResolveMorphPivot(parentMeta, rel, relatedMeta)
+	return b.loadPivotRelation(ctx, parents, parentMeta, rel, relatedMeta, constraint, pivotTable, fpk, rpk, parentKey, relatedKey, typeCol, typeVal)
+}
+
+// loadPivotRelation is the shared pivot loader for belongsToMany and the morph
+// many-to-many kinds; typeCol/typeVal (when set) filter a polymorphic pivot.
+func (b *Builder) loadPivotRelation(ctx context.Context, parents []reflect.Value, parentMeta *metadata.ModelMeta, rel metadata.RelationMeta, relatedMeta *metadata.ModelMeta, constraint func(*Builder), pivotTable, fpk, rpk, parentKey, relatedKey, typeCol, typeVal string) error {
 	parentKeyIdx, ok := parentMeta.FieldIndexByColumn(parentKey)
 	if !ok {
 		return fmt.Errorf("playsql: relation %q: parent key column %q not found", rel.Name, parentKey)
@@ -338,7 +353,7 @@ func (b *Builder) loadBelongsToMany(ctx context.Context, parents []reflect.Value
 	}
 
 	// 1. pivot rows for these parents (incl. any withPivot columns).
-	pairs, err := b.queryPivot(ctx, pivotTable, fpk, rpk, rel.PivotColumns, distinctKeys(parents, parentKeyIdx))
+	pairs, err := b.queryPivot(ctx, pivotTable, fpk, rpk, rel.PivotColumns, distinctKeys(parents, parentKeyIdx), typeCol, typeVal)
 	if err != nil {
 		return err
 	}
@@ -394,13 +409,18 @@ type pivotPair struct {
 }
 
 // queryPivot reads (foreignPivotKey, relatedPivotKey [, pivotColumns...]) rows
-// from the pivot table for the given parent keys.
-func (b *Builder) queryPivot(ctx context.Context, table, fpk, rpk string, pivotCols []string, parentKeys []any) ([]pivotPair, error) {
+// from the pivot table for the given parent keys. When typeCol is non-empty the
+// pivot is additionally filtered by typeCol = typeVal (polymorphic pivots).
+func (b *Builder) queryPivot(ctx context.Context, table, fpk, rpk string, pivotCols []string, parentKeys []any, typeCol, typeVal string) ([]pivotPair, error) {
 	cols := append([]string{fpk, rpk}, pivotCols...)
+	wheres := []grammar.WhereClause{{Kind: grammar.WhereIn, Column: fpk, Values: parentKeys}}
+	if typeCol != "" {
+		wheres = append(wheres, grammar.WhereClause{Kind: grammar.WhereBasic, Boolean: "AND", Column: typeCol, Op: "=", Value: typeVal})
+	}
 	sqlStr, args := b.sess.grammar.CompileSelect(grammar.CompiledQuery{
 		Table:   table,
 		Columns: cols,
-		Wheres:  []grammar.WhereClause{{Kind: grammar.WhereIn, Column: fpk, Values: parentKeys}},
+		Wheres:  wheres,
 	})
 
 	rows, err := b.sess.run.QueryContext(ctx, sqlStr, args...)

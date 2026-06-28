@@ -32,6 +32,8 @@ const (
 	MorphOne       RelationKind = "morphOne"
 	MorphMany      RelationKind = "morphMany"
 	MorphTo        RelationKind = "morphTo"
+	MorphToMany    RelationKind = "morphToMany"
+	MorphedByMany  RelationKind = "morphedByMany"
 )
 
 // RelationMeta describes one relationship field on a model. Keys may be empty
@@ -135,6 +137,47 @@ func ResolvePivot(parent *ModelMeta, rel RelationMeta, related *ModelMeta) (pivo
 	parentKey = parent.PrimaryKey
 	relatedKey = related.PrimaryKey
 	return
+}
+
+// ResolveMorphPivot fills in morphToMany/morphedByMany conventions: the pivot
+// table, the parent/related pivot key columns, each model's local key, and the
+// polymorphic type column plus the value to match. The morphable side (the one
+// the *_type column describes) differs by direction: for morphToMany the parent
+// is morphable; for morphedByMany the related is.
+func ResolveMorphPivot(parent *ModelMeta, rel RelationMeta, related *ModelMeta) (pivotTable, fpk, rpk, parentKey, relatedKey, typeCol, typeValue string) {
+	morph := rel.MorphName
+	pivotTable = rel.PivotTable
+	if pivotTable == "" {
+		pivotTable = morph + "s" // "taggable" -> "taggables"
+	}
+	typeCol = rel.MorphType
+	if typeCol == "" {
+		typeCol = morph + "_type"
+	}
+	morphIDCol := rel.MorphID
+	if morphIDCol == "" {
+		morphIDCol = morph + "_id" // "taggable_id"
+	}
+	parentKey = parent.PrimaryKey
+	relatedKey = related.PrimaryKey
+
+	if rel.Kind == MorphToMany {
+		// Parent is the morphable: pivot.<morph>_id = parent, related's key column.
+		fpk = morphIDCol
+		rpk = rel.RelatedPivotKey
+		if rpk == "" {
+			rpk = snake(related.StructName) + "_id"
+		}
+		typeValue = parent.MorphAlias
+	} else { // MorphedByMany: related is the morphable.
+		fpk = rel.ForeignPivotKey
+		if fpk == "" {
+			fpk = snake(parent.StructName) + "_id"
+		}
+		rpk = morphIDCol
+		typeValue = related.MorphAlias
+	}
+	return pivotTable, fpk, rpk, parentKey, relatedKey, typeCol, typeValue
 }
 
 // ResolveMorphKeys fills in morphOne/morphMany conventions: the related row's

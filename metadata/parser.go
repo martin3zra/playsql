@@ -225,7 +225,8 @@ func parseRelation(f reflect.StructField, index int) (RelationMeta, bool) {
 	opts := strings.Split(play, ",")
 	kind := RelationKind(strings.TrimSpace(opts[0]))
 	switch kind {
-	case HasMany, HasOne, BelongsTo, BelongsToMany, HasManyThrough, HasOneThrough, MorphOne, MorphMany, MorphTo:
+	case HasMany, HasOne, BelongsTo, BelongsToMany, HasManyThrough, HasOneThrough,
+		MorphOne, MorphMany, MorphTo, MorphToMany, MorphedByMany:
 	default:
 		return RelationMeta{}, false
 	}
