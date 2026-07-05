@@ -52,6 +52,26 @@ defer db.Close()
 
 Pool settings: `MaxOpenConns`, `MaxIdleConns`, `ConnMaxLifetime`.
 
+### Wrapping an existing connection
+
+When another layer already owns the connection — a shared `*sql.DB`, or a
+single-connection test transaction (e.g. [go-txdb](https://github.com/DATA-DOG/go-txdb)) —
+use `Use` / `UseTx` instead of `Open`. They wrap the handle you pass without
+calling `sql.Open`, and select the grammar by **dialect name** rather than by the
+real driver, so you can speak the `"postgres"` grammar over a `"txdb"` driver:
+
+```go
+sqlDB, _ := sql.Open("txdb", dsn)       // your handle, your lifecycle
+db, err := playsql.Use(sqlDB, "postgres")
+// ...
+tx, _ := sqlDB.BeginTx(ctx, nil)
+ptx, err := playsql.UseTx(tx, "postgres")
+```
+
+The caller owns the wrapped handle: don't call `db.Close()` on a `Use`d `DB`
+(it would close the connection you passed). An unknown dialect returns an
+`"unsupported dialect"` error rather than panicking later.
+
 ## Models
 
 A model is a plain struct. Columns come from the `db` tag (else `json`, else
@@ -580,6 +600,10 @@ non-transactional connection.
 - `make test` — unit + in-memory SQLite, no external databases.
 - `make test-int` — live integration against Postgres/MySQL/SQL Server
   (`make db-up` first, or point `PLAYSQL_*_DSN` at running instances).
+- Per-test isolation: register [go-txdb](https://github.com/DATA-DOG/go-txdb)
+  over your real DSN, `sql.Open` the txdb driver, and hand the handle to
+  `playsql.Use(db, "<dialect>")` (see [Wrapping an existing connection](#wrapping-an-existing-connection)).
+  Each test runs in a transaction that rolls back, seeing its own uncommitted data.
 
 ## Design principles (enforced invariants)
 

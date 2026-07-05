@@ -111,6 +111,31 @@ func Open(cfg Config) (*DB, error) {
 	return db, nil
 }
 
+// Use wraps an already-open *sql.DB, selecting the grammar by dialect name
+// rather than by the real driver. It bypasses sql.Open, so the handle's pool
+// and connection lifecycle are owned by the caller — e.g. a go-txdb
+// single-connection test transaction opened under the "txdb" driver but spoken
+// to with the "postgres" grammar. Because the caller owns the handle, prefer not
+// to call the returned DB's Close (it would close the passed *sql.DB).
+func Use(existing *sql.DB, dialect string) (*DB, error) {
+	g := grammar.For(dialect)
+	if g == nil {
+		return nil, fmt.Errorf("playsql: unsupported dialect %q", dialect)
+	}
+	return &DB{sql: existing, session: &session{run: existing, grammar: g}}, nil
+}
+
+// UseTx wraps an in-progress *sql.Tx with a grammar selected by dialect name,
+// like Use. The returned *Tx cannot be closed or begin nested transactions,
+// matching the *Tx handed to DB.Tx.
+func UseTx(tx *sql.Tx, dialect string) (*Tx, error) {
+	g := grammar.For(dialect)
+	if g == nil {
+		return nil, fmt.Errorf("playsql: unsupported dialect %q", dialect)
+	}
+	return &Tx{session: &session{run: tx, grammar: g}}, nil
+}
+
 // OpenDSN is the low-level constructor: a driver name and a ready-made DSN. Open
 // builds on it. Useful for tests and custom DSNs.
 func OpenDSN(driver, dsn string) (*DB, error) {
