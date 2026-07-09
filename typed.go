@@ -88,6 +88,20 @@ func (t *TypedBuilder[T]) Unless(condition bool, fn func(*TypedBuilder[T]), othe
 	return t.When(!condition, fn, otherwise...)
 }
 
+// LockForUpdate takes a FOR UPDATE lock on the selected rows. Requires a
+// transaction; see Builder.LockForUpdate.
+func (t *TypedBuilder[T]) LockForUpdate() *TypedBuilder[T] {
+	t.b.LockForUpdate()
+	return t
+}
+
+// SharedLock takes a shared lock on the selected rows. Requires a transaction;
+// see Builder.SharedLock.
+func (t *TypedBuilder[T]) SharedLock() *TypedBuilder[T] {
+	t.b.SharedLock()
+	return t
+}
+
 func (t *TypedBuilder[T]) OrWhere(column, op string, value any) *TypedBuilder[T] {
 	t.b.OrWhere(column, op, value)
 	return t
