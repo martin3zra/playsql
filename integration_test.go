@@ -177,11 +177,17 @@ type itDriver struct {
 }
 
 func itDrivers() []itDriver {
-	// Defaults target the already-running camel containers; override via env.
+	// Defaults match docker-compose.yml, so `make db-up && make test-int` works
+	// with no configuration; override via env to target other instances. Keep
+	// these in step with the compose file: an unreachable driver is skipped, not
+	// failed, so a stale default silently drops a dialect from the run.
+	//
+	// SQL Server uses master because its image has no init hook to create a
+	// database on startup, unlike the postgres and mysql images.
 	return []itDriver{
-		{"postgres", playsql.Postgres, env("PLAYSQL_POSTGRES_DSN", "postgres://postgres:secret@localhost:5433/camel?sslmode=disable"), "postgres"},
-		{"mysql", playsql.MySQL, env("PLAYSQL_MYSQL_DSN", "root:secret@tcp(localhost:3306)/camel?parseTime=true"), "mysql"},
-		{"mssql", playsql.MSSQL, env("PLAYSQL_MSSQL_DSN", "sqlserver://sa:Camel_Test_123@localhost:1433?database=camel_test&encrypt=disable&TrustServerCertificate=true"), "mssql"},
+		{"postgres", playsql.Postgres, env("PLAYSQL_POSTGRES_DSN", "postgres://playsql:secret@localhost:5432/playsql?sslmode=disable"), "postgres"},
+		{"mysql", playsql.MySQL, env("PLAYSQL_MYSQL_DSN", "root:secret@tcp(localhost:3306)/playsql?parseTime=true"), "mysql"},
+		{"mssql", playsql.MSSQL, env("PLAYSQL_MSSQL_DSN", "sqlserver://sa:Playsql_Test_123@localhost:1433?database=master&encrypt=disable&TrustServerCertificate=true"), "mssql"},
 	}
 }
 
