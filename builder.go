@@ -465,6 +465,32 @@ func (b *Builder) OrWhereGroup(fn func(*Builder)) *Builder {
 	return b.group("OR", fn)
 }
 
+// When runs fn only when condition is true, folding a conditional predicate
+// into a chain instead of breaking out into an if. The optional otherwise
+// closure runs when condition is false (Laravel's $default argument).
+//
+//	q.When(customerType != "all", func(q *Builder) {
+//	    q.WhereEq("customer_type", string(customerType))
+//	})
+func (b *Builder) When(condition bool, fn func(*Builder), otherwise ...func(*Builder)) *Builder {
+	if condition {
+		if fn != nil {
+			fn(b)
+		}
+	} else if len(otherwise) > 0 && otherwise[0] != nil {
+		otherwise[0](b)
+	}
+	return b
+}
+
+// Unless is When with the condition inverted: fn runs when condition is false.
+// The optional otherwise closure runs when condition is true.
+//
+//	q.Unless(showAll, func(q *Builder) { q.WhereEq("active", true) })
+func (b *Builder) Unless(condition bool, fn func(*Builder), otherwise ...func(*Builder)) *Builder {
+	return b.When(!condition, fn, otherwise...)
+}
+
 func (b *Builder) group(boolean string, fn func(*Builder)) *Builder {
 	sub := &Builder{sess: b.sess, meta: b.meta}
 	fn(sub)

@@ -69,6 +69,25 @@ func (t *TypedBuilder[T]) WhereEq(column string, value any) *TypedBuilder[T] {
 	return t
 }
 
+// When runs fn only when condition is true (Laravel's when helper). The
+// optional otherwise closure runs when condition is false.
+func (t *TypedBuilder[T]) When(condition bool, fn func(*TypedBuilder[T]), otherwise ...func(*TypedBuilder[T])) *TypedBuilder[T] {
+	if condition {
+		if fn != nil {
+			fn(t)
+		}
+	} else if len(otherwise) > 0 && otherwise[0] != nil {
+		otherwise[0](t)
+	}
+	return t
+}
+
+// Unless is When with the condition inverted: fn runs when condition is false.
+// The optional otherwise closure runs when condition is true.
+func (t *TypedBuilder[T]) Unless(condition bool, fn func(*TypedBuilder[T]), otherwise ...func(*TypedBuilder[T])) *TypedBuilder[T] {
+	return t.When(!condition, fn, otherwise...)
+}
+
 func (t *TypedBuilder[T]) OrWhere(column, op string, value any) *TypedBuilder[T] {
 	t.b.OrWhere(column, op, value)
 	return t
