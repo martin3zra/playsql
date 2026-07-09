@@ -153,6 +153,39 @@ it stays fast for deep pages. A single `Column` must be unique and monotonic
 ties**. Add a unique tiebreaker via composite `Keys` (e.g. `created_at` + `id`)
 to page non-unique columns safely.
 
+### Conditional clauses
+
+`When` applies a closure only if a condition holds, so optional filters stay in
+the chain instead of breaking it up with `if` statements. `Unless` is the same
+with the condition inverted.
+
+```go
+// instead of:
+//   if customerType != "all" {
+//       q = q.WhereEq("customer_type", customerType)
+//   }
+q = q.When(customerType != "all", func(q *playsql.Builder) {
+    q.WhereEq("customer_type", customerType)
+})
+
+q = q.Unless(showAll, func(q *playsql.Builder) {
+    q.WhereEq("active", true)
+})
+```
+
+Both take an optional third closure, run when the condition takes the other
+branch:
+
+```go
+q = q.When(sortByName,
+    func(q *playsql.Builder) { q.OrderBy("name", playsql.Asc) },
+    func(q *playsql.Builder) { q.OrderBy("id", playsql.Asc) })
+```
+
+Unlike Laravel's `when($value, ...)`, the condition is a plain `bool` — Go has
+no truthiness — and the closure receives only the builder. Available on both
+`Builder` and `Query[T]`.
+
 ## Write
 
 Struct-based (full model lifecycle, fires hooks):
@@ -594,6 +627,47 @@ err := db.Tx(ctx, func(tx *playsql.Tx) error {
 
 The closure receives a `*Tx`, so transaction code cannot accidentally run on a
 non-transactional connection.
+
+### Pessimistic locking
+
+`LockForUpdate` blocks other writers and shared locks until the transaction
+ends; `SharedLock` blocks writers but lets other readers take a shared lock.
+
+```go
+err := db.Tx(ctx, func(tx *playsql.Tx) error {
+    var account Account
+    if err := tx.Model(&Account{}).WhereEq("id", id).
+        LockForUpdate().First(ctx, &account); err != nil {
+        return err
+    }
+    account.Balance -= 100
+    return tx.Save(ctx, &account)
+})
+```
+
+Both **require a transaction**. Under autocommit the lock is released before the
+rows are scanned, so the query would appear to succeed while protecting nothing;
+calling them outside a transaction fails with `ErrLockOutsideTx` at the terminal
+op rather than locking nothing silently.
+
+```go
+err := db.Model(&Account{}).LockForUpdate().Get(ctx, &accounts)
+errors.Is(err, playsql.ErrLockOutsideTx) // true
+```
+
+The emitted SQL is dialect-specific:
+
+| Dialect | `LockForUpdate()` | `SharedLock()` |
+| --- | --- | --- |
+| Postgres | `FOR UPDATE` | `FOR SHARE` |
+| MySQL | `FOR UPDATE` | `LOCK IN SHARE MODE` |
+| SQL Server | `WITH (ROWLOCK, UPDLOCK, HOLDLOCK)` | `WITH (ROWLOCK, HOLDLOCK)` |
+| SQLite | *(no row locks — clause dropped)* | *(dropped)* |
+
+SQLite has no row-level locking, so the clause is omitted; a transaction there
+still serializes writers. `Count` strips the lock (Postgres rejects `FOR UPDATE`
+alongside an aggregate), and a lock set inside a subquery closure never reaches
+the generated SQL.
 
 ## Testing
 
