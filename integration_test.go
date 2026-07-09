@@ -313,6 +313,7 @@ func TestIntegration(t *testing.T) {
 			runSubquerySuite(t, db)
 			runMorphSuite(t, db)
 			runPivotSuite(t, db)
+			runLockSuite(t, db, drv.dialect)
 		})
 	}
 }

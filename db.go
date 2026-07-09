@@ -28,6 +28,7 @@ type runner interface {
 type session struct {
 	run     runner
 	grammar grammar.Grammar
+	inTx    bool // true when run is a *sql.Tx; gates pessimistic locking
 }
 
 // Model starts a query builder for the given model value. The value is used for
@@ -133,7 +134,7 @@ func UseTx(tx *sql.Tx, dialect string) (*Tx, error) {
 	if g == nil {
 		return nil, fmt.Errorf("playsql: unsupported dialect %q", dialect)
 	}
-	return &Tx{session: &session{run: tx, grammar: g}}, nil
+	return &Tx{session: &session{run: tx, grammar: g, inTx: true}}, nil
 }
 
 // OpenDSN is the low-level constructor: a driver name and a ready-made DSN. Open
@@ -204,7 +205,7 @@ func (db *DB) Tx(ctx context.Context, fn func(*Tx) error) (err error) {
 		return fmt.Errorf("playsql: begin: %w", err)
 	}
 
-	tx := &Tx{session: &session{run: sqlTx, grammar: db.grammar}}
+	tx := &Tx{session: &session{run: sqlTx, grammar: db.grammar, inTx: true}}
 
 	defer func() {
 		if p := recover(); p != nil {

@@ -81,9 +81,21 @@ type CompiledQuery struct {
 	SubSelects []SubSelectColumn // arbitrary correlated subquery columns (AddSelect)
 	Wheres     []WhereClause
 	Orders     []OrderClause
-	Limit      int // 0 => no LIMIT
-	Offset     int // 0 => no OFFSET
+	Limit      int      // 0 => no LIMIT
+	Offset     int      // 0 => no OFFSET
+	Lock       LockMode // LockNone => no pessimistic lock
 }
+
+// LockMode selects the pessimistic row lock applied to a SELECT. SQLite has no
+// row-level locks and drops the clause; SQL Server expresses it as a table hint
+// on the FROM clause rather than a trailing keyword.
+type LockMode int
+
+const (
+	LockNone   LockMode = iota
+	LockUpdate          // FOR UPDATE: blocks other writers and shared locks
+	LockShared          // FOR SHARE: blocks writers, allows concurrent readers
+)
 
 // SubSelectColumn is an arbitrary correlated subquery emitted as "(<Query>) AS
 // Alias" in the select list (the addSelect feature).
@@ -239,6 +251,7 @@ func selectBody(g Grammar, sb *strings.Builder, q CompiledQuery, n *int) (args [
 
 	sb.WriteString(" FROM ")
 	sb.WriteString(g.Wrap(q.Table))
+	sb.WriteString(lockHint(g, q.Lock))
 
 	if len(q.Wheres) > 0 {
 		clause, wargs := compileWheres(g, q.Wheres, n)
@@ -270,8 +283,11 @@ func selectBody(g Grammar, sb *strings.Builder, q CompiledQuery, n *int) (args [
 }
 
 // writeNestedSelect writes a complete inner SELECT (body + dialect row limit)
-// into sb, sharing the parent's bind counter.
+// into sb, sharing the parent's bind counter. A lock is only meaningful on the
+// outermost query, so it is dropped here rather than trusting callers never to
+// set one on a subquery.
 func writeNestedSelect(g Grammar, sb *strings.Builder, q CompiledQuery, n *int) []any {
+	q.Lock = LockNone
 	args, hasOrder := selectBody(g, sb, q, n)
 	writeLimit(g, sb, q, hasOrder)
 	return args
@@ -302,6 +318,47 @@ func writeLimit(g Grammar, sb *strings.Builder, q CompiledQuery, hasOrder bool) 
 	}
 }
 
+// lockHint returns the SQL Server table hint for a lock mode, including the
+// leading space ("" for every other dialect, or for LockNone). SQL Server has no
+// FOR UPDATE; the lock rides on the FROM clause instead. HOLDLOCK holds it to
+// the end of the transaction, matching the other dialects' semantics.
+func lockHint(g Grammar, m LockMode) string {
+	if _, ok := g.(MSSQL); !ok {
+		return ""
+	}
+	switch m {
+	case LockUpdate:
+		return " WITH (ROWLOCK, UPDLOCK, HOLDLOCK)"
+	case LockShared:
+		return " WITH (ROWLOCK, HOLDLOCK)"
+	}
+	return ""
+}
+
+// writeLock appends the trailing lock clause, which must follow LIMIT/OFFSET.
+// Only MySQL and Postgres use this position: SQLite has no row locks, and SQL
+// Server has already emitted its hint via lockHint. Callers must not invoke this
+// for a nested SELECT — a lock is only meaningful on the outermost query.
+func writeLock(g Grammar, sb *strings.Builder, m LockMode) {
+	if m == LockNone {
+		return
+	}
+	switch g.(type) {
+	case Postgres:
+		if m == LockUpdate {
+			sb.WriteString(" FOR UPDATE")
+		} else {
+			sb.WriteString(" FOR SHARE")
+		}
+	case MySQL:
+		if m == LockUpdate {
+			sb.WriteString(" FOR UPDATE")
+		} else {
+			sb.WriteString(" LOCK IN SHARE MODE")
+		}
+	}
+}
+
 // compileSelect assembles a full SELECT with the dialect row limit, threading a
 // fresh bind counter through the (possibly nested) query.
 func compileSelect(g Grammar, q CompiledQuery) (string, []any) {
@@ -309,6 +366,7 @@ func compileSelect(g Grammar, q CompiledQuery) (string, []any) {
 	n := 0
 	args, hasOrder := selectBody(g, &sb, q, &n)
 	writeLimit(g, &sb, q, hasOrder)
+	writeLock(g, &sb, q.Lock)
 	return sb.String(), args
 }
 

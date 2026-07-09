@@ -45,6 +45,7 @@ type Builder struct {
 	subSelects  []grammar.SubSelectColumn // AddSelect correlated subquery columns
 	limit       int
 	offset      int
+	lock        grammar.LockMode
 	trashed     trashedMode
 	scopes      []Scope
 	inScope     bool  // routes add() into scopeWheres while a scope applies
@@ -465,6 +466,32 @@ func (b *Builder) OrWhereGroup(fn func(*Builder)) *Builder {
 	return b.group("OR", fn)
 }
 
+// When runs fn only when condition is true, folding a conditional predicate
+// into a chain instead of breaking out into an if. The optional otherwise
+// closure runs when condition is false (Laravel's $default argument).
+//
+//	q.When(customerType != "all", func(q *Builder) {
+//	    q.WhereEq("customer_type", string(customerType))
+//	})
+func (b *Builder) When(condition bool, fn func(*Builder), otherwise ...func(*Builder)) *Builder {
+	if condition {
+		if fn != nil {
+			fn(b)
+		}
+	} else if len(otherwise) > 0 && otherwise[0] != nil {
+		otherwise[0](b)
+	}
+	return b
+}
+
+// Unless is When with the condition inverted: fn runs when condition is false.
+// The optional otherwise closure runs when condition is true.
+//
+//	q.Unless(showAll, func(q *Builder) { q.WhereEq("active", true) })
+func (b *Builder) Unless(condition bool, fn func(*Builder), otherwise ...func(*Builder)) *Builder {
+	return b.When(!condition, fn, otherwise...)
+}
+
 func (b *Builder) group(boolean string, fn func(*Builder)) *Builder {
 	sub := &Builder{sess: b.sess, meta: b.meta}
 	fn(sub)
@@ -611,6 +638,30 @@ func (b *Builder) Take(n int) *Builder { return b.Limit(n) }
 
 // Skip is an alias for Offset (Eloquent-style).
 func (b *Builder) Skip(n int) *Builder { return b.Offset(n) }
+
+// --- pessimistic locking ---
+//
+// Both methods require a transaction: under autocommit the lock is released
+// before the rows are scanned, so the query would appear to succeed while
+// protecting nothing. Calling them outside one fails with ErrLockOutsideTx at
+// the next terminal op. Note that SQLite has no row-level locks and drops the
+// clause; a transaction there still serializes writers.
+
+// LockForUpdate takes a FOR UPDATE lock on the selected rows, blocking other
+// writers and shared locks until the transaction ends.
+func (b *Builder) LockForUpdate() *Builder { return b.setLock(grammar.LockUpdate) }
+
+// SharedLock takes a shared lock on the selected rows, blocking writers while
+// still allowing other readers to take a shared lock.
+func (b *Builder) SharedLock() *Builder { return b.setLock(grammar.LockShared) }
+
+func (b *Builder) setLock(m grammar.LockMode) *Builder {
+	if !b.sess.inTx {
+		return b.fail(ErrLockOutsideTx)
+	}
+	b.lock = m
+	return b
+}
 
 // Returning names the columns UpdateReturning should return from the affected
 // rows (emitted as RETURNING, or OUTPUT INSERTED on SQL Server).
@@ -897,6 +948,7 @@ func (b *Builder) compiled() grammar.CompiledQuery {
 		Orders:     b.orders,
 		Limit:      b.limit,
 		Offset:     b.offset,
+		Lock:       b.lock,
 	}
 }
 
@@ -975,6 +1027,7 @@ func (b *Builder) Count(ctx context.Context) (int64, error) {
 	q := b.compiled()
 	q.Aggregate = "COUNT(*)"
 	q.Limit, q.Offset = 0, 0
+	q.Lock = grammar.LockNone // Postgres rejects FOR UPDATE with an aggregate
 	sqlStr, args := b.sess.grammar.CompileSelect(q)
 
 	var count int64
