@@ -186,6 +186,99 @@ Unlike Laravel's `when($value, ...)`, the condition is a plain `bool` — Go has
 no truthiness — and the closure receives only the builder. Available on both
 `Builder` and `Query[T]`.
 
+### Developer experience
+
+`Tap`, `Scope`, `Debug` and `DD` are ergonomics helpers — they compose and
+inspect a query, they do not extend the SQL surface. All are available on both
+`Builder` and `Query[T]`.
+
+**`Tap`** runs a side effect inline and returns the same builder, so logging or
+an assertion can sit in a chain without breaking it:
+
+```go
+playsql.Query[Invoice](db).
+    Where("company_id", "=", companyID).
+    Tap(func(q *playsql.TypedBuilder[Invoice]) {
+        if debug {
+            log.Println(q.SQL())
+        }
+    }).
+    Get(ctx)
+```
+
+**`Scope`** composes named, reusable constraints. A `QueryScope[T]` is just a
+function that shapes the builder — opt-in and applied explicitly (distinct from
+the ctx-aware, auto-applied [global scopes](#global-scopes)):
+
+```go
+func Company(id int) playsql.QueryScope[Invoice] {
+    return func(q *playsql.TypedBuilder[Invoice]) { q.WhereEq("company_id", id) }
+}
+
+func Active() playsql.QueryScope[Invoice] {
+    return func(q *playsql.TypedBuilder[Invoice]) { q.WhereNull("deleted_at") }
+}
+
+playsql.Query[Invoice](db).
+    Scope(
+        Company(companyID),
+        Active(),
+    ).
+    Get(ctx)
+```
+
+**`SQL`** and **`Args`** return the rendered SELECT and its bind arguments
+without executing — useful inside `Tap`, tests, or your own logging:
+
+```go
+q := playsql.Query[User](db).WhereEq("age", 30)
+q.SQL()  // SELECT "id", "name", "age" FROM "users" WHERE "age" = ?
+q.Args() // [30]
+```
+
+**`Debug`** enables SQL logging for that one builder only (not global state): it
+prints the SQL, args and execution duration for each statement it runs.
+
+```go
+playsql.Query[Invoice](db).
+    Scope(
+        Company(companyID),
+        Active(),
+    ).
+    Debug().
+    Get(ctx)
+```
+
+```
+[playsql]
+
+SQL:
+SELECT * FROM users WHERE company_id = ?
+
+Args:
+[5]
+
+Duration:
+1.42ms
+```
+
+By default it writes via the standard library `log` package; implement
+`playsql.Logger` to route the output elsewhere.
+
+**`DD`** ("dump and die") dumps the pending query — SQL, bindings, model, table,
+columns, eager loads and scopes — and stops execution *before the statement is
+sent*, by panicking with `playsql.DumpAndDie`:
+
+```go
+playsql.Query[Invoice](db).
+    Where("id", "=", 15).
+    DD().
+    First(ctx)
+```
+
+Because it panics with a dedicated type rather than calling `os.Exit`, it stays
+testable — recover the `DumpAndDie` value and inspect its `Dump` field.
+
 ## Write
 
 Struct-based (full model lifecycle, fires hooks):

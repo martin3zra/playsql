@@ -48,10 +48,11 @@ type Builder struct {
 	lock        grammar.LockMode
 	trashed     trashedMode
 	scopes      []Scope
-	inScope     bool  // routes add() into scopeWheres while a scope applies
-	scopesDone  bool  // scopes applied (or skipped) once already
-	skipScopes  bool  // WithoutGlobalScopes
-	err         error // first construction error; surfaced by terminal ops
+	inScope     bool   // routes add() into scopeWheres while a scope applies
+	scopesDone  bool   // scopes applied (or skipped) once already
+	skipScopes  bool   // WithoutGlobalScopes
+	logger      Logger // Debug/DD sink; nil => defaultLogger
+	err         error  // first construction error; surfaced by terminal ops
 }
 
 func newBuilder(s *session, model any) *Builder {

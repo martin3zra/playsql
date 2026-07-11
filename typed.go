@@ -391,3 +391,57 @@ func (t *TypedBuilder[T]) Upsert(ctx context.Context, rows []map[string]any, con
 func (t *TypedBuilder[T]) Delete(ctx context.Context) (int64, error) {
 	return t.b.Delete(ctx)
 }
+
+// --- developer experience (Tap / Scope / Debug / DD / SQL / Args) ---
+
+// QueryScope is a composable, per-query constraint: a function that shapes a
+// builder. Unlike the package-level Scope interface (global, auto-applied,
+// ctx-aware), a QueryScope is opt-in and applied explicitly via Scope(...):
+//
+//	func Company(id int) playsql.QueryScope[Invoice] {
+//		return func(q *playsql.TypedBuilder[Invoice]) { q.WhereEq("company_id", id) }
+//	}
+type QueryScope[T any] func(*TypedBuilder[T])
+
+// Scope applies each QueryScope to the builder in order and returns it, so named
+// reusable constraints compose in a chain:
+//
+//	playsql.Query[Invoice](db).Scope(Company(id), Active()).Get(ctx)
+func (t *TypedBuilder[T]) Scope(scopes ...QueryScope[T]) *TypedBuilder[T] {
+	for _, s := range scopes {
+		if s != nil {
+			s(t)
+		}
+	}
+	return t
+}
+
+// Tap invokes fn with the builder and returns it unchanged, letting a side
+// effect (logging, an assertion, conditional shaping) sit inline in a chain.
+// Tap mutates nothing itself; fn may.
+func (t *TypedBuilder[T]) Tap(fn func(*TypedBuilder[T])) *TypedBuilder[T] {
+	if fn != nil {
+		fn(t)
+	}
+	return t
+}
+
+// Debug enables SQL logging (SQL, args, duration) for this builder only; see
+// (*Builder).Debug.
+func (t *TypedBuilder[T]) Debug() *TypedBuilder[T] {
+	t.b.Debug()
+	return t
+}
+
+// DD dumps the pending query and halts execution with a DumpAndDie panic before
+// the statement is sent; see (*Builder).DD.
+func (t *TypedBuilder[T]) DD() *TypedBuilder[T] {
+	t.b.DD()
+	return t
+}
+
+// SQL returns the SELECT the builder would run, without executing it.
+func (t *TypedBuilder[T]) SQL() string { return t.b.SQL() }
+
+// Args returns the bind arguments SQL() would carry, without executing.
+func (t *TypedBuilder[T]) Args() []any { return t.b.Args() }
