@@ -186,6 +186,60 @@ Unlike Laravel's `when($value, ...)`, the condition is a plain `bool` — Go has
 no truthiness — and the closure receives only the builder. Available on both
 `Builder` and `Query[T]`.
 
+### Request-driven filters
+
+`ApplyFilters` turns HTTP query parameters into query constraints from an
+allow-list declared per model. Implement `Filterable` by returning a `FilterMap`
+that maps each query-param name to a handler. Only params present in the request
+are applied; unknown params (and declared filters the request omits) are ignored.
+
+```go
+type LessonFilters struct{}
+
+func (LessonFilters) Filters() playsql.FilterMap {
+    return playsql.FilterMap{
+        "difficulty": func(b *playsql.Builder, v playsql.FilterValue) {
+            b.WhereEq("difficulty", v.String())
+        },
+        "id": func(b *playsql.Builder, v playsql.FilterValue) {
+            b.WhereIn("id", v.CSVInts()...) // ?id=1,2,3
+        },
+        "age": func(b *playsql.Builder, v playsql.FilterValue) {
+            op, n := v.OperatorInt() // ?age=>=30  ->  ">=", 30
+            b.Where("age", op, n)
+        },
+        "search": func(b *playsql.Builder, v playsql.FilterValue) {
+            b.Where("title", "LIKE", "%"+v.String()+"%")
+        },
+    }
+}
+
+// GET /lessons?difficulty=hard&age=>=30&id=1,2,3
+lessons, err := playsql.Query[Lesson](db).
+    ApplyFilters(r.URL.Query(), LessonFilters{}).
+    Get(ctx)
+```
+
+The handler receives a `FilterValue`, not a raw string, because query params are
+always strings but binding a string to a numeric column errors on some drivers
+(Postgres). Coerce explicitly with its accessors — a coercion failure records an
+error that surfaces at the terminal op:
+
+| Accessor | Use | Example input |
+| --- | --- | --- |
+| `String()` | raw value | `?q=go` |
+| `Int()` / `Int64()` / `Float()` | numeric column | `?age=30` |
+| `Bool()` | `1/0`, `t/f`, `true/false` | `?active=true` |
+| `CSV()` / `CSVStrings()` / `CSVInts()` | `WhereIn(col, v.CSVInts()...)` | `?id=1,2,3` |
+| `All()` | repeated key | `?tag=a&tag=b` |
+| `Operator()` | request-supplied operator | `?age=>=30` → `">=", "30"` |
+| `OperatorInt()` / `OperatorFloat()` | operator + numeric value | `?age=>=30` → `">=", 30` |
+
+`Operator()` recognizes `>=`, `<=`, `<>`, `!=`, `>`, `<`, `=`, defaulting to `=`
+when the value carries none. Params are flat (no `filter[...]` wrapper) and the
+input is stdlib `url.Values`, so any framework's query accessor feeds it — e.g.
+forge's `ctx.QueryValues()`. Available on both `Builder` and `Query[T]`.
+
 ### Developer experience
 
 `Tap`, `Scope`, `Debug` and `DD` are ergonomics helpers — they compose and

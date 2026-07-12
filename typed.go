@@ -3,6 +3,7 @@ package playsql
 import (
 	"context"
 	"database/sql"
+	"net/url"
 )
 
 // Query starts a type-parameterized query for model T against a DB or Tx. It is
@@ -86,6 +87,13 @@ func (t *TypedBuilder[T]) When(condition bool, fn func(*TypedBuilder[T]), otherw
 // The optional otherwise closure runs when condition is true.
 func (t *TypedBuilder[T]) Unless(condition bool, fn func(*TypedBuilder[T]), otherwise ...func(*TypedBuilder[T])) *TypedBuilder[T] {
 	return t.When(!condition, fn, otherwise...)
+}
+
+// ApplyFilters runs the model's declared request filters against values; see
+// (*Builder).ApplyFilters.
+func (t *TypedBuilder[T]) ApplyFilters(values url.Values, f Filterable) *TypedBuilder[T] {
+	t.b.ApplyFilters(values, f)
+	return t
 }
 
 // LockForUpdate takes a FOR UPDATE lock on the selected rows. Requires a
