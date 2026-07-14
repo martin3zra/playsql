@@ -333,6 +333,118 @@ playsql.Query[Invoice](db).
 Because it panics with a dedicated type rather than calling `os.Exit`, it stays
 testable — recover the `DumpAndDie` value and inspect its `Dump` field.
 
+## Query events
+
+`Debug` watches one builder. `Listen` watches the whole connection: it registers
+a callback that runs after **every** statement the connection executes — builder
+terminals, struct writes, raw queries, eager loads, pivot writes, and anything
+inside a transaction.
+
+```go
+db.Listen(func(e playsql.QueryEvent) {
+    slog.Info("query",
+        "sql", e.SQL,        // as sent, placeholders unresolved
+        "args", e.Args,      // bind arguments
+        "dur", e.Duration,   // measured around the driver call
+        "err", e.Err,        // non-nil when the statement failed
+        "op", e.Op,          // OpQuery | OpQueryRow | OpExec
+        "in_tx", e.InTx,
+    )
+})
+```
+
+The event also carries the `Ctx` the statement ran under, so a listener can pull
+a trace or tenant ID out of it.
+
+Listeners **observe**; they cannot alter, abort or retry a statement — shaping
+queries is what [scopes](#global-scopes) and [filters](#request-driven-filters)
+are for. A listener runs synchronously on the goroutine that issued the query, so
+a slow listener slows the query. A panicking listener is contained: the panic is
+swallowed and the query still returns.
+
+Register listeners during setup, before the DB serves queries. Registering
+concurrently with in-flight queries is a data race, the same way `http.Handle`
+after `ListenAndServe` is.
+
+Statements halted by `DD` never reach the database, so they emit no event.
+Statements under `Debug` emit one as usual, on top of the debug log line.
+
+### Monitoring cumulative query time
+
+The query that kills a request is often not one slow query but forty fast ones.
+`WhenQueryingForLongerThan` fires when the statements of a **single unit of
+work** have cumulatively spent longer than a threshold in the database:
+
+```go
+db.WhenQueryingForLongerThan(500*time.Millisecond,
+    func(e playsql.QueryEvent, s playsql.QueryStats) {
+        slog.Warn("slow request",
+            "db_total", s.Total,     // cumulative time in this scope
+            "queries", s.Count,      // statements in this scope
+            "slowest", s.Slowest.SQL,
+            "tipped_by", e.SQL)      // the statement that crossed the line
+    })
+```
+
+A unit of work is marked with `TrackQueryTime`, which seeds an accumulator on the
+context. Every statement run under that context adds to it:
+
+```go
+func QueryTime(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        ctx := playsql.TrackQueryTime(r.Context())
+        next.ServeHTTP(w, r.WithContext(ctx))
+    })
+}
+```
+
+This is the one place playsql deliberately does not copy Laravel. There,
+`whenQueryingForLongerThan` counts on a field of the connection, and PHP's
+process-per-request model makes that per-request for free. A Go `*DB` is
+long-lived and shared by every goroutine in the process, so a counter on the
+connection would trip on aggregate traffic rather than on any one slow request —
+and would fire once for the life of the process unless something reset it. The
+scope is therefore explicit, and the context is what carries it.
+
+The consequences of that choice:
+
+- A handler fires **at most once per scope**. A new request is a new scope, which
+  re-arms it — so there is no `allowQueryDurationHandlersToRunAgain` equivalent,
+  and nothing to reset. Long-lived workers call `TrackQueryTime` per iteration.
+- Statements run under a context that never went through `TrackQueryTime`
+  accumulate nothing and fire no handler. Forget the middleware and you get
+  silence — so playsql logs a one-time warning the first time this happens while
+  a handler is registered.
+- Scopes do not nest: `TrackQueryTime` on an already-tracked context starts a
+  fresh, independent accumulator.
+
+Read a scope's running totals at any point with `Stats`:
+
+```go
+s := playsql.Stats(ctx) // QueryStats{Total, Count, Slowest}
+```
+
+Handlers, like listeners, run synchronously, are panic-isolated, and must be
+registered during setup.
+
+### Lifetime counters
+
+Independent of any scope, a connection counts everything it has ever run — the
+process-wide view, for a metrics endpoint:
+
+```go
+db.TotalQueryDuration() // time.Duration spent executing statements
+db.QueryCount()         // statements executed
+db.ResetQueryStats()    // zero both (for a benchmark or a test)
+```
+
+> **`Op == OpQueryRow` reports a near-zero duration.** `database/sql` defers the
+> driver work of a single-row query to `Scan`, which happens after playsql's
+> timer has stopped, so its `Duration` is ~0 and its `Err` is always nil. This
+> affects `Count` and the Postgres insert-returning-id path, whose time is
+> therefore undercounted in every total above. `Debug` has always had the same
+> blind spot.
+
 ## Write
 
 Struct-based (full model lifecycle, fires hooks):

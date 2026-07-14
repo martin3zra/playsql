@@ -26,9 +26,35 @@ type runner interface {
 // session carries everything connection-level except the executor. Query entry
 // lives here, defined once and inherited identically by DB and Tx.
 type session struct {
-	run     runner
-	grammar grammar.Grammar
-	inTx    bool // true when run is a *sql.Tx; gates pessimistic locking
+	run       runner
+	grammar   grammar.Grammar
+	inTx      bool               // true when run is a *sql.Tx; gates pessimistic locking
+	listeners []func(QueryEvent) // DB.Listen callbacks; see events.go
+	handlers  []durationHandler  // WhenQueryingForLongerThan callbacks; see querystats.go
+	stats     *dbStats           // lifetime counters, shared with transaction sessions
+}
+
+// newSession wraps run in a listenRunner so every statement the session issues
+// emits a QueryEvent. All connection constructors go through it.
+func newSession(run runner, g grammar.Grammar, inTx bool) *session {
+	s := &session{grammar: g, inTx: inTx, stats: &dbStats{}}
+	s.run = listenRunner{next: run, sess: s}
+	return s
+}
+
+// child builds the session a transaction runs on: a different executor, but the
+// same grammar, listeners, duration handlers and lifetime counters as the
+// connection that opened it.
+func (s *session) child(run runner) *session {
+	c := &session{
+		grammar:   s.grammar,
+		inTx:      true,
+		listeners: s.listeners,
+		handlers:  s.handlers,
+		stats:     s.stats,
+	}
+	c.run = listenRunner{next: run, sess: c}
+	return c
 }
 
 // Model starts a query builder for the given model value. The value is used for
@@ -123,7 +149,7 @@ func Use(existing *sql.DB, dialect string) (*DB, error) {
 	if g == nil {
 		return nil, fmt.Errorf("playsql: unsupported dialect %q", dialect)
 	}
-	return &DB{sql: existing, session: &session{run: existing, grammar: g}}, nil
+	return &DB{sql: existing, session: newSession(existing, g, false)}, nil
 }
 
 // UseTx wraps an in-progress *sql.Tx with a grammar selected by dialect name,
@@ -134,7 +160,7 @@ func UseTx(tx *sql.Tx, dialect string) (*Tx, error) {
 	if g == nil {
 		return nil, fmt.Errorf("playsql: unsupported dialect %q", dialect)
 	}
-	return &Tx{session: &session{run: tx, grammar: g, inTx: true}}, nil
+	return &Tx{session: newSession(tx, g, true)}, nil
 }
 
 // OpenDSN is the low-level constructor: a driver name and a ready-made DSN. Open
@@ -164,7 +190,7 @@ func OpenDSN(driver, dsn string) (*DB, error) {
 		return nil, fmt.Errorf("playsql: ping: %w", err)
 	}
 
-	return &DB{sql: conn, session: &session{run: conn, grammar: g}}, nil
+	return &DB{sql: conn, session: newSession(conn, g, false)}, nil
 }
 
 func isSQLite(driver string) bool {
@@ -205,7 +231,7 @@ func (db *DB) Tx(ctx context.Context, fn func(*Tx) error) (err error) {
 		return fmt.Errorf("playsql: begin: %w", err)
 	}
 
-	tx := &Tx{session: &session{run: sqlTx, grammar: db.grammar, inTx: true}}
+	tx := &Tx{session: db.child(sqlTx)}
 
 	defer func() {
 		if p := recover(); p != nil {

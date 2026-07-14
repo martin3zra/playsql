@@ -27,7 +27,13 @@ func TestUseGrammarByName(t *testing.T) {
 	if _, ok := db.grammar.(grammar.Postgres); !ok {
 		t.Fatalf("want grammar.Postgres, got %T", db.grammar)
 	}
-	if db.run != raw {
+	// Every session wraps its executor in a listenRunner; the handle underneath
+	// must still be the one the caller passed.
+	lr, ok := db.run.(listenRunner)
+	if !ok {
+		t.Fatalf("runner is not a listenRunner, got %T", db.run)
+	}
+	if lr.next != raw {
 		t.Fatal("runner is not the passed *sql.DB")
 	}
 }

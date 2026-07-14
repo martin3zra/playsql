@@ -80,9 +80,19 @@ func (b *Builder) DD() *Builder {
 }
 
 // useRunner replaces the builder's session with a clone whose runner is r. Only
-// this builder is affected; the grammar and transaction flag are preserved.
+// this builder is affected; the grammar, transaction flag and listeners are
+// preserved. Debug stacks its runner on top of the session's listenRunner, so a
+// debugged query still emits events; DD replaces it outright, so a dumped query
+// emits none.
 func (b *Builder) useRunner(r runner) {
-	b.sess = &session{run: r, grammar: b.sess.grammar, inTx: b.sess.inTx}
+	b.sess = &session{
+		run:       r,
+		grammar:   b.sess.grammar,
+		inTx:      b.sess.inTx,
+		listeners: b.sess.listeners,
+		handlers:  b.sess.handlers,
+		stats:     b.sess.stats,
+	}
 }
 
 // --- Debug: timing/logging runner ---
