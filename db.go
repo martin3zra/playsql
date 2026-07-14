@@ -9,6 +9,7 @@ package playsql
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -102,9 +103,13 @@ func (s *session) rawRow(ctx context.Context, query string, args ...any) *sql.Ro
 }
 
 // DB is a pooled connection. It can begin transactions and be closed.
+//
+// A DB from Dynamic has no pool of its own: sql is nil and resolve is set, so
+// Close and Tx go through the resolver instead. See dynamic.go.
 type DB struct {
 	*session
-	sql *sql.DB
+	sql     *sql.DB
+	resolve func(context.Context) (*sql.DB, error)
 }
 
 // Tx is an in-progress transaction. It cannot be closed or re-opened.
@@ -219,14 +224,31 @@ func resolveDriverName(driver string) string {
 	return driver // neither registered; let sql.Open report it
 }
 
-// Close releases the underlying connection pool.
-func (db *DB) Close() error { return db.sql.Close() }
+// Close releases the underlying connection pool. On a DB from Dynamic there is
+// no such pool — the resolver hands back handles the caller owns — so Close
+// closes nothing and says so.
+func (db *DB) Close() error {
+	if db.resolve != nil {
+		return errors.New("playsql: Close on a Dynamic DB: the caller owns the resolved pools")
+	}
+	return db.sql.Close()
+}
 
 // Tx runs fn inside a transaction. The closure receives a *Tx — so transaction
 // code physically cannot reach Close, the pool, or a non-tx runner. Commit on
 // success, rollback on error or panic.
+// A Dynamic DB resolves the connection first, then begins on it: the whole
+// transaction runs on the one handle ctx selected at Tx time, and a resolver
+// that changes its mind mid-transaction cannot move it.
 func (db *DB) Tx(ctx context.Context, fn func(*Tx) error) (err error) {
-	sqlTx, err := db.sql.BeginTx(ctx, nil)
+	conn := db.sql
+	if db.resolve != nil {
+		if conn, err = db.resolve(ctx); err != nil {
+			return err
+		}
+	}
+
+	sqlTx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("playsql: begin: %w", err)
 	}
