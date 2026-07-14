@@ -52,7 +52,7 @@ type Owner struct {
 	Name string `db:"name"`
 }
 
-func (Owner) Table() string { return "owners" }
+func (Owner) TableName() string { return "owners" }
 
 func TestDynamicRoutesByContext(t *testing.T) {
 	_, _, resolve := twoDBs(t)
