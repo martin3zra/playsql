@@ -64,9 +64,40 @@ func (s *session) Model(model any) *Builder {
 	return newBuilder(s, model)
 }
 
+// rebind rewrites "?" bind placeholders to the session dialect's form
+// (Postgres "$1", MSSQL "@p1", ...). The query builder already emits
+// dialect-correct placeholders, so this only runs on the Raw* / Exec entry
+// points, where callers write portable "?" SQL. Dialects that use "?"
+// natively (SQLite, MySQL) short-circuit the query unchanged.
+//
+// A "?" inside a single-quoted string literal is left alone. A literal "?"
+// outside a string (e.g. a Postgres jsonb key-exists operator) isn't
+// supported in Raw SQL — use the builder for that.
+func (s *session) rebind(query string) string {
+	if s.grammar.Placeholder(1) == "?" {
+		return query
+	}
+	var b strings.Builder
+	b.Grow(len(query) + 8)
+	n, inString := 0, false
+	for i := 0; i < len(query); i++ {
+		switch c := query[i]; {
+		case c == '\'':
+			inString = !inString
+			b.WriteByte(c)
+		case c == '?' && !inString:
+			n++
+			b.WriteString(s.grammar.Placeholder(n))
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
 // Exec runs a raw statement on the session's runner (connection or tx).
 func (s *session) Exec(ctx context.Context, query string, args ...any) (sql.Result, error) {
-	return s.run.ExecContext(ctx, query, args...)
+	return s.run.ExecContext(ctx, s.rebind(query), args...)
 }
 
 // Raw runs an arbitrary query and scans the result into dest, a pointer to a
@@ -78,7 +109,7 @@ func (s *session) Raw(ctx context.Context, dest any, query string, args ...any) 
 	if err != nil {
 		return err
 	}
-	rows, err := s.run.QueryContext(ctx, query, args...)
+	rows, err := s.run.QueryContext(ctx, s.rebind(query), args...)
 	if err != nil {
 		return err
 	}
@@ -93,13 +124,13 @@ func (s *session) Raw(ctx context.Context, dest any, query string, args ...any) 
 // escape hatch for result shapes Raw cannot map (multiple result sets, columns
 // scanned into locals, etc.). The caller owns the rows and must Close them.
 func (s *session) RawRows(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
-	return s.run.QueryContext(ctx, query, args...)
+	return s.run.QueryContext(ctx, s.rebind(query), args...)
 }
 
 // rawRow runs a query and returns the raw *sql.Row; it backs the generic
 // RawScalar. Unexported so only *DB/*Tx (same package) satisfy that interface.
 func (s *session) rawRow(ctx context.Context, query string, args ...any) *sql.Row {
-	return s.run.QueryRowContext(ctx, query, args...)
+	return s.run.QueryRowContext(ctx, s.rebind(query), args...)
 }
 
 // DB is a pooled connection. It can begin transactions and be closed.
