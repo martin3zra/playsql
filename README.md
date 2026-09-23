@@ -102,7 +102,7 @@ update) and dirty tracking (so `Update` writes only changed columns).
 Two equivalent styles — typed (`Query[T]`) or untyped (`db.Model`):
 
 ```go
-// typed: returns []User
+// typed: returns collection.Collection[User]
 users, err := playsql.Query[User](db).WhereEq("active", true).Get(ctx)
 
 // untyped: scans into a destination
@@ -477,7 +477,7 @@ db.Model(&User{}).Where("active", "=", false).
     Returning("id", "name").
     UpdateReturning(ctx, map[string]any{"active": true}, &updated)
 
-// Generic form returns []T directly:
+// Generic form returns a collection.Collection[T] directly:
 rows, _ := playsql.Query[User](db).
     WhereEq("active", false).
     Returning("id", "name").

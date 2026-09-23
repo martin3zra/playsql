@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"net/url"
+
+	"github.com/martin3zra/playsql/collection"
 )
 
 // Query starts a type-parameterized query for model T against a DB or Tx. It is
@@ -19,20 +21,20 @@ func Query[T any](src interface{ Model(any) *Builder }) *TypedBuilder[T] {
 	return &TypedBuilder[T]{b: src.Model(&zero)}
 }
 
-// RawQuery runs an arbitrary query and scans the rows into a []T, mapping
-// columns to fields via T's metadata. It is the generic counterpart to
+// RawQuery runs an arbitrary query and scans the rows into a collection,
+// mapping columns to fields via T's metadata. It is the generic counterpart to
 // (*session).Raw — src is a *DB or *Tx.
 //
 //	users, err := playsql.RawQuery[User](db, ctx,
 //		"SELECT * FROM users WHERE age > ?", 18)
 func RawQuery[T any](src interface {
 	Raw(ctx context.Context, dest any, query string, args ...any) error
-}, ctx context.Context, query string, args ...any) ([]T, error) {
+}, ctx context.Context, query string, args ...any) (collection.Collection[T], error) {
 	var out []T
 	if err := src.Raw(ctx, &out, query, args...); err != nil {
 		return nil, err
 	}
-	return out, nil
+	return collection.Collect(out), nil
 }
 
 // RawScalar runs a query expected to yield a single row with a single column and
@@ -305,11 +307,11 @@ func (t *TypedBuilder[T]) OnlyTrashed() *TypedBuilder[T] { t.b.OnlyTrashed(); re
 
 // --- terminals (typed results) ---
 
-// Get returns all matching rows as a slice of T.
-func (t *TypedBuilder[T]) Get(ctx context.Context) ([]T, error) {
+// Get returns all matching rows as a collection of T.
+func (t *TypedBuilder[T]) Get(ctx context.Context) (collection.Collection[T], error) {
 	var out []T
 	err := t.b.Get(ctx, &out)
-	return out, err
+	return collection.Collect(out), err
 }
 
 // First returns the first matching row, or the zero T and ErrNotFound.
@@ -331,11 +333,11 @@ func (t *TypedBuilder[T]) Count(ctx context.Context) (int64, error) {
 	return t.b.Count(ctx)
 }
 
-// GetPtr returns all matching rows as a slice of *T.
-func (t *TypedBuilder[T]) GetPtr(ctx context.Context) ([]*T, error) {
+// GetPtr returns all matching rows as a collection of *T.
+func (t *TypedBuilder[T]) GetPtr(ctx context.Context) (collection.Collection[*T], error) {
 	var out []*T
 	err := t.b.Get(ctx, &out)
-	return out, err
+	return collection.Collect(out), err
 }
 
 // --- writes (map-based, mass-assignment filtered) ---
@@ -375,14 +377,15 @@ func (t *TypedBuilder[T]) WithCTEQuery(name string, sub *Builder) *TypedBuilder[
 	return t
 }
 
-// UpdateReturning mass-assigns data and returns the affected rows as a []T.
-// Requires Returning(...) columns and a dialect with RETURNING/OUTPUT.
-func (t *TypedBuilder[T]) UpdateReturning(ctx context.Context, data map[string]any) ([]T, error) {
+// UpdateReturning mass-assigns data and returns the affected rows as a
+// collection of T. Requires Returning(...) columns and a dialect with
+// RETURNING/OUTPUT.
+func (t *TypedBuilder[T]) UpdateReturning(ctx context.Context, data map[string]any) (collection.Collection[T], error) {
 	var out []T
 	if err := t.b.UpdateReturning(ctx, data, &out); err != nil {
 		return nil, err
 	}
-	return out, nil
+	return collection.Collect(out), nil
 }
 
 // InsertMany bulk-inserts rows and returns the number inserted.

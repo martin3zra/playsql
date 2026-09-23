@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+
+	"github.com/martin3zra/playsql/collection"
 )
 
 // Pagination holds the metadata for an offset-paginated result.
@@ -51,14 +53,14 @@ func (b *Builder) Paginate(ctx context.Context, dest any, page, perPage int) (Pa
 // pagination metadata.
 type TypedPage[T any] struct {
 	Pagination
-	Items []T
+	Items collection.Collection[T]
 }
 
 // Paginate fetches one page of T and its metadata.
 func (t *TypedBuilder[T]) Paginate(ctx context.Context, page, perPage int) (TypedPage[T], error) {
 	var items []T
 	p, err := t.b.Paginate(ctx, &items, page, perPage)
-	return TypedPage[T]{Pagination: p, Items: items}, err
+	return TypedPage[T]{Pagination: p, Items: collection.Collect(items)}, err
 }
 
 // CursorKey is one ordered key of a (possibly composite) keyset cursor.
@@ -233,12 +235,12 @@ func (b *Builder) cursorValues(last reflect.Value, keys []CursorKey, composite b
 // CursorPage is a typed keyset page: the items plus the cursor metadata.
 type CursorPage[T any] struct {
 	CursorResult
-	Items []T
+	Items collection.Collection[T]
 }
 
 // CursorPaginate fetches a keyset page of T.
 func (t *TypedBuilder[T]) CursorPaginate(ctx context.Context, c Cursor) (CursorPage[T], error) {
 	var items []T
 	res, err := t.b.CursorPaginate(ctx, &items, c)
-	return CursorPage[T]{CursorResult: res, Items: items}, err
+	return CursorPage[T]{CursorResult: res, Items: collection.Collect(items)}, err
 }
